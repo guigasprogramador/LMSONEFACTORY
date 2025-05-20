@@ -1,6 +1,6 @@
 # Migrau00e7u00e3o do Supabase para PostgreSQL na Azure
 
-Este documento descreve o processo de migrau00e7u00e3o da autenticau00e7u00e3o do Supabase para o PostgreSQL na Azure, permitindo que a aplicau00e7u00e3o LMS continue funcionando no novo ambiente.
+Este documento descreve o processo de migração da autenticação do Supabase para o PostgreSQL na Azure, permitindo que a aplicau00e7u00e3o LMS continue funcionando no novo ambiente.
 
 ## Visão Geral
 
