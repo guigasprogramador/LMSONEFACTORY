@@ -3,9 +3,9 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { enrollmentService } from "@/services/api";
+import { fetchWithAuth } from "@/services/api/restClient";
 
 interface Course {
   id: string;
@@ -30,18 +30,10 @@ const CourseSelector = ({ userId, onEnrollmentComplete }: CourseSelectorProps) =
       try {
         setIsLoading(true);
         
-        // Buscar todos os cursos
-        const { data: coursesData, error: coursesError } = await supabase
-          .from('courses')
-          .select('id, title');
+        // Buscar todos os cursos usando a API REST
+        const coursesData = await fetchWithAuth('/api/courses');
         
-        if (coursesError) {
-          console.error('Erro ao buscar cursos:', coursesError);
-          toast.error('Erro ao carregar cursos disponíveis');
-          return;
-        }
-        
-        if (!coursesData) {
+        if (!coursesData || coursesData.length === 0) {
           console.log('Nenhum curso encontrado');
           return;
         }
@@ -50,14 +42,9 @@ const CourseSelector = ({ userId, onEnrollmentComplete }: CourseSelectorProps) =
         
         // Buscar cursos em que o usuário já está matriculado
         if (userId) {
-          const { data: enrollments, error: enrollmentsError } = await supabase
-            .from('enrollments')
-            .select('course_id')
-            .eq('user_id', userId);
+          const enrollments = await fetchWithAuth(`/api/enrollments?user_id=${userId}`);
           
-          if (enrollmentsError) {
-            console.error('Erro ao buscar matrículas:', enrollmentsError);
-          } else if (enrollments) {
+          if (enrollments && enrollments.length > 0) {
             const enrolledIds = enrollments.map(e => e.course_id);
             setEnrolledCourses(enrolledIds);
           }

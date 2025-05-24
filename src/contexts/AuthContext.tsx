@@ -97,7 +97,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     // Then check for existing session
     const initializeAuth = async () => {
       try {
+        console.log('Inicializando autenticau00e7u00e3o...');
         const { data, error } = await supabase.auth.getSession();
+        
+        // Verificar se temos um token no localStorage
+        const token = localStorage.getItem('lms-auth-token-v2');
+        if (token) {
+          console.log('Token encontrado no localStorage, tentando restaurar sessu00e3o...');
+        } else {
+          console.log('Nenhum token encontrado no localStorage');
+        }
         
         if (error) {
           console.error('Error getting session:', error);
@@ -278,8 +287,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const logout = async () => {
     try {
       setIsLoading(true);
-      // Usar o método signOut com scope 'local' para manter tokens de refresh
-      const { error } = await supabase.auth.signOut({ scope: 'local' });
+      // Usar o método signOut sem argumentos, pois nosso adaptador não suporta o scope
+      const { error } = await supabase.auth.signOut();
       if (error) throw error;
       
       // Limpar estados locais
@@ -288,8 +297,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setLoginAttempts(0);
       setIsRetrying(false);
       
-      // Não vamos mais limpar o cache manualmente para evitar problemas
-      // O Supabase já gerencia isso corretamente com signOut({ scope: 'local' })
+      // Limpar o cache manualmente
+      localStorage.removeItem('lms-auth-token-v2');
+      localStorage.removeItem('lms-user');
       
       toast.success("Logout realizado com sucesso!");
     } catch (error: any) {

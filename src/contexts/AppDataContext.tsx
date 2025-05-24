@@ -1,7 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { Course, Module, Lesson } from '@/types';
 import { courseService, moduleService, lessonService } from '@/services/api';
-import { supabase } from '@/integrations/supabase/client';
 
 interface AppDataContextType {
   courses: Course[];
@@ -213,42 +212,34 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
         console.error('Erro no carregamento inicial:', error);
       });
 
-    // Configurar inscrições em tempo real do Supabase de forma otimizada
-    // Usar um único canal para todas as tabelas reduz overhead
-    const dataChannel = supabase
-      .channel('public:data_changes')
-      .on('postgres_changes', { 
-        event: '*', 
-        schema: 'public', 
-        table: 'courses' 
-      }, (payload) => {
-        // Atualizar apenas quando estamos na área administrativa
-        // ou quando é uma mudança crítica (inserção/deleção)
-        if (payload.eventType === 'INSERT' || payload.eventType === 'DELETE') {
-          console.log('Mudança crítica detectada em cursos:', payload.eventType);
-          refreshCourses();
-        }
-      })
-      .on('postgres_changes', { 
-        event: '*', 
-        schema: 'public', 
-        table: 'modules' 
-      }, (payload: any) => {
-        // Atualizar apenas módulos do curso afetado, não todos os módulos
-        const courseId = payload.new?.course_id || payload.old?.course_id;
-        if (courseId) {
-          console.log(`Mudança detectada em módulos do curso ${courseId}`);
-          // Atualizamos o cache apenas se já tivermos carregado esses módulos antes
-          if (modules.some(m => m.courseId === courseId)) {
-            refreshModules(courseId);
-          }
-        }
-      })
-      .subscribe();
+    // Configurar um intervalo para atualizar dados periodicamente
+    const refreshInterval = setInterval(() => {
+      // Atualizar cursos a cada 30 segundos
+      refreshCourses().catch(error => {
+        console.error('Erro ao atualizar cursos:', error);
+      });
+      
+      // Se tivermos módulos carregados, atualizamos eles também
+      if (Object.keys(modules).length > 0) {
+        loadAllModules().catch(error => {
+          console.error('Erro ao atualizar módulos:', error);
+        });
+      }
+      
+      // Se tivermos lições carregadas, atualizamos elas também
+      if (Object.keys(lessons).length > 0) {
+        // Atualizamos apenas as lições dos módulos que já foram carregados
+        Object.keys(modules).forEach(moduleId => {
+          refreshLessons(moduleId).catch(error => {
+            console.error(`Erro ao atualizar lições do módulo ${moduleId}:`, error);
+          });
+        });
+      }
+    }, 30000); // 30 segundos
 
-    // Limpar inscrições ao desmontar
+    // Limpar intervalo de atualização ao desmontar
     return () => {
-      dataChannel.unsubscribe();
+      clearInterval(refreshInterval);
     };
   }, [refreshCourses, refreshModules]);
 

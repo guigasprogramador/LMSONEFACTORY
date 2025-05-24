@@ -152,7 +152,7 @@ const CourseDetails = () => {
             </div>
             <div className="flex items-center">
               <div className="text-yellow-500 mr-1">★</div>
-              <span>{course.rating.toFixed(1)}</span>
+              <span>{typeof course.rating === 'number' ? course.rating.toFixed(1) : '0.0'}</span>
             </div>
           </div>
         </div>

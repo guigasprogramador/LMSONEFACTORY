@@ -7,10 +7,11 @@ import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
 import { Lesson, Module } from "@/types";
 import VideoPlayer from "@/components/VideoPlayer";
-import { supabase } from "@/integrations/supabase/client";
 import { CheckCircle, Award, ChevronRight } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { useAuth } from "@/contexts/AuthContext";
+import * as restClient from "@/services/api/restClient";
 
 const CoursePlayer = () => {
   const { id } = useParams<{ id: string }>();
@@ -28,6 +29,9 @@ const CoursePlayer = () => {
   const [courseCompletedRecently, setCourseCompletedRecently] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
 
+  // Usar o hook de autenticação para obter o usuário atual
+  const { user } = useAuth();
+  
   useEffect(() => {
     const fetchModulesAndLessons = async () => {
       setLoading(true);
@@ -37,42 +41,40 @@ const CoursePlayer = () => {
         setLoading(false);
         return;
       }
+      
+      if (!user) {
+        setError('Você precisa estar logado para acessar este curso');
+        setLoading(false);
+        return;
+      }
+      
+      // Armazenar o ID do usuário para uso posterior
+      setUserId(user.id);
+      
       try {
         // Buscar informações do curso
-        const { data: courseData, error: courseError } = await supabase
-          .from('courses')
-          .select('id, title')
-          .eq('id', id)
-          .single();
-        if (courseError || !courseData) {
+        const courseData = await restClient.getCourseById(id);
+        if (!courseData) {
           setError('Curso não encontrado');
           setLoading(false);
           return;
         }
         setCourseName(courseData.title);
         
-        // Obter usuário autenticado
-        const { data: { user }, error: userError } = await supabase.auth.getUser();
-        if (userError || !user) {
-          setError('Você precisa estar logado para acessar este curso');
-          setLoading(false);
-          return;
-        }
-        
-        // Armazenar o ID do usuário para uso posterior
-        setUserId(user.id);
-        
         // Buscar módulos e aulas
         const mods = await moduleService.getModulesByCourseId(id);
         const lessonsIds = mods.flatMap(module => module.lessons ? module.lessons.map(lesson => lesson.id) : []);
         
         // Buscar progresso salvo no banco
-        const { data: completedLessons, error: completedLessonsError } = await supabase
-          .from('lesson_progress')
-          .select('lesson_id')
-          .eq('user_id', user.id)
-          .eq('completed', true)
-          .in('lesson_id', lessonsIds);
+        let completedLessons: { lesson_id: string, completed: boolean }[] = [];
+        
+        try {
+          // Tentar usar a API REST
+          completedLessons = await restClient.getLessonProgress(user.id, lessonsIds);
+        } catch (progressError) {
+          console.error('Erro ao buscar progresso das aulas:', progressError);
+          // Se falhar, continuamos com array vazio
+        }
         
         const completedLessonsSet = new Set(completedLessons?.map(item => item.lesson_id) || []);
         
@@ -116,6 +118,28 @@ const CoursePlayer = () => {
     fetchModulesAndLessons();
   }, [id]);
 
+
+  // Efeito para atualizar o progresso quando a aula selecionada mudar
+  useEffect(() => {
+    if (selectedLesson && modules.length > 0) {
+      const { totalLessons, completedLessonsCount } = countLessons();
+      const calculatedProgress = totalLessons > 0 ? Math.round((completedLessonsCount / totalLessons) * 100) : 0;
+      setProgress(calculatedProgress);
+    }
+  }, [selectedLesson, modules]);
+
+
+
+  // Efeito para atualizar o progresso quando a aula selecionada mudar
+  useEffect(() => {
+    if (selectedLesson && modules.length > 0) {
+      const { totalLessons, completedLessonsCount } = countLessons();
+      const calculatedProgress = totalLessons > 0 ? Math.round((completedLessonsCount / totalLessons) * 100) : 0;
+      setProgress(calculatedProgress);
+    }
+  }, [selectedLesson, modules]);
+
+
   // Função para contar aulas totais e concluídas
   const countLessons = (mods = modules) => {
     let totalLessons = 0;
@@ -135,32 +159,22 @@ const CoursePlayer = () => {
   const checkCertificate = async (userId: string, courseId: string) => {
     try {
       // Verificar se já existe certificado
-      const { data, error } = await supabase
-        .from('certificates')
-        .select('id')
-        .eq('user_id', userId)
-        .eq('course_id', courseId)
-        .limit(1);
+      const certData = await restClient.checkCertificate(userId, courseId);
       
-      if (error) {
-        console.error('Erro ao verificar certificado:', error);
-        return;
-      }
-      
-      if (data && data.length > 0) {
-        setCertificateId(data[0].id);
+      if (certData) {
+        setCertificateId(certData.id);
         setIsEligibleForCertificate(true);
       } else {
         // Se não existe certificado, verificar elegibilidade
-        const { data: enrollmentData, error: enrollmentError } = await supabase
-          .from('enrollments')
-          .select('progress')
-          .eq('user_id', userId)
-          .eq('course_id', courseId)
-          .single();
+        try {
+          // Usar nossa API REST para verificar o enrollment
+          const enrollmentData = await restClient.checkEnrollment(courseId, userId);
         
-        if (!enrollmentError && enrollmentData && enrollmentData.progress === 100) {
-          setIsEligibleForCertificate(true);
+          if (enrollmentData && enrollmentData.progress === 100) {
+            setIsEligibleForCertificate(true);
+          }
+        } catch (enrollmentError) {
+          console.error('Erro ao verificar matrícula:', enrollmentError);
         }
       }
     } catch (error) {
@@ -169,116 +183,42 @@ const CoursePlayer = () => {
   };
 
   // Função para gerar certificado
-  const generateCertificate = async () => {
+  const createCertificate = async () => {
     if (!userId || !id) return;
     
     try {
-      // Verificar se já existe certificado
-      const { data: existingCert, error: existingCertError } = await supabase
-        .from('certificates')
-        .select('id')
-        .eq('user_id', userId)
-        .eq('course_id', id)
-        .limit(1);
+      const data = await restClient.createCertificate(userId, id);
       
-      if (existingCertError) {
-        console.error('Erro ao verificar certificado existente:', existingCertError);
-        toast.error('Erro ao verificar certificado');
-        return null;
+      if (!data) {
+        toast.error('Erro ao gerar certificado. Tente novamente.');
+        return false;
       }
       
-      // Se já existe certificado, retornar o ID
-      if (existingCert && existingCert.length > 0) {
-        setCertificateId(existingCert[0].id);
-        return existingCert[0].id;
-      }
-      
-      // Buscar dados do usuário
-      const { data: userData, error: userError } = await supabase
-        .from('profiles')
-        .select('name')
-        .eq('id', userId)
-        .single();
-      
-      if (userError) {
-        console.error('Erro ao buscar dados do usuário:', userError);
-        toast.error('Erro ao gerar certificado');
-        return null;
-      }
-      
-      // Buscar dados do curso
-      const { data: courseData, error: courseError } = await supabase
-        .from('courses')
-        .select('title, duration')
-        .eq('id', id)
-        .single();
-      
-      if (courseError) {
-        console.error('Erro ao buscar dados do curso:', courseError);
-        toast.error('Erro ao gerar certificado');
-        return null;
-      }
-      
-      // Preparar dados para o certificado
-      const userName = userData?.name || 'Aluno';
-      const courseTitle = courseData?.title || 'Curso';
-      let courseHours = 40; // Valor padrão
-      
-      if (courseData?.duration) {
-        const hoursMatch = courseData.duration.match(/(\d+)\s*h/i);
-        if (hoursMatch && hoursMatch[1]) {
-          courseHours = parseInt(hoursMatch[1], 10);
-        }
-      }
-      
-      // Criar certificado
-      const now = new Date().toISOString();
-      
-      const { data: newCertificate, error: createError } = await supabase
-        .from('certificates')
-        .insert({
-          user_id: userId,
-          course_id: id,
-          user_name: userName,
-          course_name: courseTitle,
-          course_hours: courseHours,
-          issue_date: now
-        })
-        .select('id')
-        .single();
-      
-      if (createError) {
-        console.error('Erro ao criar certificado:', createError);
-        toast.error('Erro ao gerar certificado');
-        return null;
-      }
-      
-      if (newCertificate) {
-        setCertificateId(newCertificate.id);
-        setIsEligibleForCertificate(true);
-        toast.success('Certificado gerado com sucesso!');
-        return newCertificate.id;
-      }
-      
-      return null;
+      setCertificateId(data.id);
+      toast.success('Certificado gerado com sucesso!');
+      setShowCongratulations(false);
+      navigate(`/aluno/certificados/${data.id}`);
+      return true;
     } catch (error) {
-      console.error('Erro ao gerar certificado:', error);
-      toast.error('Erro ao gerar certificado');
-      return null;
+      console.error('Erro ao criar certificado:', error);
+      toast.error('Erro ao gerar certificado. Tente novamente.');
+      return false;
     }
   };
 
   // Função para navegar para a página do certificado
-  const goToCertificate = async () => {
+  const viewCertificate = async () => {
     let certId = certificateId;
     
     if (!certId && isEligibleForCertificate) {
       // Gerar certificado se elegível mas ainda não gerado
-      certId = await generateCertificate();
-    }
-    
-    if (certId) {
-      navigate(`/aluno/certificado/${certId}`);
+      const result = await createCertificate();
+      if (result) {
+        // O redirecionamento já é feito dentro de createCertificate
+        return;
+      }
+    } else if (certId) {
+      navigate(`/aluno/certificados/${certId}`);
     } else {
       toast.error('Não foi possível acessar o certificado');
     }
@@ -297,66 +237,54 @@ const CoursePlayer = () => {
     try {
       // Marcar a aula como concluída no banco de dados
       console.log(`Marcando aula ${selectedLesson.id} como concluída para usuário ${userId}`);
-      await lessonProgressService.markLessonAsCompleted(userId, selectedLesson.id);
+      await restClient.markLessonAsCompleted(userId, selectedLesson.id);
       
-      // Atualizar o estado local
-      const updatedModules = modules.map(module => {
-        if (module.id === selectedModule?.id) {
-          return {
-            ...module,
-            lessons: module.lessons?.map(lesson => 
-              lesson.id === selectedLesson.id 
-                ? { ...lesson, isCompleted: true } 
-                : lesson
-            )
-          };
-        }
-        return module;
-      });
-      
-      setModules(updatedModules);
-      
-      // Recalcular o progresso
-      const { totalLessons, completedLessonsCount } = countLessons(updatedModules);
-      const calculatedProgress = Math.round((completedLessonsCount / totalLessons) * 100);
-      setProgress(calculatedProgress);
-      
-      // Atualizar o progresso na matrícula
-      try {
-        const { error } = await supabase
-          .from('enrollments')
-          .update({ progress: calculatedProgress })
-          .eq('user_id', userId)
-          .eq('course_id', id);
+      // Atualizar os módulos e aulas em memória
+      setModules(prevModules => {
+        const updatedModules = [...prevModules];
         
-        if (error) {
-          console.error('Erro ao atualizar matrícula:', error);
-        } else {
-          console.log('Matrícula atualizada com sucesso');
+        for (const module of updatedModules) {
+          if (!module.lessons) continue;
           
-          // Verificar se o curso foi concluído
-          if (calculatedProgress === 100) {
-            console.log('Curso 100% concluído, iniciando verificação de certificado...');
-            setCourseCompletedRecently(true);
-            
-            // Verificar certificado
-            await checkCertificate(userId, id);
-            
-            // Mostrar o modal de parabéns após um pequeno atraso
-            setTimeout(() => {
-              setShowCongratulations(true);
-            }, 1000);
+          for (let i = 0; i < module.lessons.length; i++) {
+            if (module.lessons[i].id === selectedLesson.id) {
+              module.lessons[i].isCompleted = true;
+              break;
+            }
           }
         }
-      } catch (error) {
-        console.error('Erro ao obter usuário:', error);
+        
+        return updatedModules;
+      });
+      
+      // Recalcular progresso
+      const { totalLessons, completedLessonsCount } = countLessons();
+      const calculatedProgress = totalLessons > 0 ? Math.round((completedLessonsCount / totalLessons) * 100) : 0;
+      setProgress(calculatedProgress);
+      
+      // Atualizar o progresso na tabela de matrículas sempre que uma aula for concluída
+      try {
+        await restClient.updateCourseProgress(id, userId, calculatedProgress);
+        console.log(`Progresso do curso atualizado para ${calculatedProgress}%`);
+      } catch (progressError) {
+        console.error('Erro ao atualizar progresso do curso:', progressError);
       }
       
-      toast.success('Aula marcada como concluída!');
+      // Se progresso for 100%, mostrar diálogo de parabenização
+      if (calculatedProgress === 100 && !certificateId) {
+        setCourseCompletedRecently(true);
+        setShowCongratulations(true);
+        
+        // Verificar certificado
+        checkCertificate(userId, id);
+      }
     } catch (error) {
       console.error('Erro ao marcar aula como concluída:', error);
-      toast.error('Erro ao marcar aula como concluída. Tente novamente.');
+      toast.error('Erro ao marcar aula como concluída');
+      return;
     }
+    
+    toast.success('Aula marcada como concluída!');
   };
 
   // Verificar se pode navegar para a aula anterior
@@ -371,6 +299,11 @@ const CoursePlayer = () => {
     if (!selectedModule || !selectedLesson || !selectedModule.lessons) return;
     const currentLessonIdx = selectedModule.lessons.findIndex(l => l.id === selectedLesson.id);
     if (currentLessonIdx > 0) {
+      // Atualizar o progresso antes de mudar de aula
+      const { totalLessons, completedLessonsCount } = countLessons();
+      const calculatedProgress = totalLessons > 0 ? Math.round((completedLessonsCount / totalLessons) * 100) : 0;
+      setProgress(calculatedProgress);
+      
       setSelectedLesson(selectedModule.lessons[currentLessonIdx - 1]);
     }
   };
@@ -387,6 +320,11 @@ const CoursePlayer = () => {
     if (!selectedModule || !selectedLesson || !selectedModule.lessons) return;
     const currentLessonIdx = selectedModule.lessons.findIndex(l => l.id === selectedLesson.id);
     if (currentLessonIdx < selectedModule.lessons.length - 1) {
+      // Atualizar o progresso antes de mudar de aula
+      const { totalLessons, completedLessonsCount } = countLessons();
+      const calculatedProgress = totalLessons > 0 ? Math.round((completedLessonsCount / totalLessons) * 100) : 0;
+      setProgress(calculatedProgress);
+      
       setSelectedLesson(selectedModule.lessons[currentLessonIdx + 1]);
     }
   };
@@ -418,13 +356,9 @@ const CoursePlayer = () => {
             <Button variant="outline" onClick={() => setShowCongratulations(false)}>
               Continuar explorando o curso
             </Button>
-            <Button 
-              onClick={goToCertificate} 
-              className="gap-2"
-              disabled={!isEligibleForCertificate}
-            >
-              <Award className="h-4 w-4" /> 
-              Ver meu certificado
+            <Button size="lg" className="mb-4 py-8 text-lg" onClick={() => createCertificate()}>
+              <Award className="mr-2 h-6 w-6" />
+              Gerar Certificado
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -4,7 +4,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { courseService } from "@/services/api";
 import { moduleService } from "@/services/moduleService";
 import { lessonService } from "@/services/lessonService";
-import { supabase } from "@/integrations/supabase/client";
+import { getCourses, getModulesByCourseId, getLessonsByModuleId, getUsers } from "@/services/api/restClient";
+import { certificateService } from "@/services/certificateService";
 import { BookOpen, Award, Users, FileText, Layers } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -37,62 +38,60 @@ const AdminDashboard = () => {
     const fetchData = async () => {
       try {
         if (user) {
-          // Buscar cursos
-          const courses = await courseService.getCourses();
+          // Buscar cursos usando o cliente REST
+          const courses = await getCourses();
           
-          // Buscar módulos diretamente do banco de dados
-          const { data: modulesData, error: modulesError } = await supabase
-            .from('modules')
-            .select('id, course_id');
-            
-          if (modulesError) {
-            console.error("Erro ao buscar módulos:", modulesError);
-          }
+          // Vamos buscar todos os módulos para cada curso
+          let allModules = [];
+          let allLessons = [];
           
-          // Buscar aulas diretamente do banco de dados
-          const { data: lessonsData, error: lessonsError } = await supabase
-            .from('lessons')
-            .select('id, module_id');
-            
-          if (lessonsError) {
-            console.error("Erro ao buscar aulas:", lessonsError);
+          // Para cada curso, buscar seus módulos
+          for (const course of courses) {
+            try {
+              const modules = await getModulesByCourseId(course.id);
+              allModules = [...allModules, ...modules];
+              
+              // Para cada módulo, buscar suas aulas
+              for (const module of modules) {
+                try {
+                  const lessons = await getLessonsByModuleId(module.id);
+                  allLessons = [...allLessons, ...lessons];
+                } catch (error) {
+                  console.error(`Erro ao buscar aulas para o módulo ${module.id}:`, error);
+                }
+              }
+            } catch (error) {
+              console.error(`Erro ao buscar módulos para o curso ${course.id}:`, error);
+            }
           }
           
           // Calcular totais
-          const totalModules = modulesData?.length || 0;
-          const totalLessons = lessonsData?.length || 0;
+          const totalModules = allModules.length;
+          const totalLessons = allLessons.length;
           
-          // Obter estatísticas de usuários e certificados do Supabase
-          const { data: usersData, error: usersError } = await supabase
-            .from('profiles')
-            .select('id', { count: 'exact' });
-            
-          if (usersError) {
-            console.error("Erro ao buscar usuários:", usersError);
-          }
-            
-          const { data: certificatesData, error: certificatesError } = await supabase
-            .from('certificates')
-            .select('id', { count: 'exact' });
+          // Buscar contagem de usuários e certificados da API
+          const [usersData, certificatesData] = await Promise.all([
+            getUsers(),
+            certificateService.getCertificates()
+          ]);
           
-          if (certificatesError) {
-            console.error("Erro ao buscar certificados:", certificatesError);
-          }
+          const totalUsers = usersData?.length || 0;
+          const totalCertificates = certificatesData?.length || 0;
           
           setStats({
             totalCourses: courses.length,
             totalModules,
             totalLessons,
-            totalUsers: usersData?.length || 0,
-            totalCertificates: certificatesData?.length || 0,
+            totalUsers,
+            totalCertificates,
           });
           
           console.log("Estatísticas do dashboard:", {
             cursos: courses.length,
-            modulos: totalModules,
+            módulos: totalModules,
             aulas: totalLessons,
-            usuarios: usersData?.length || 0,
-            certificados: certificatesData?.length || 0,
+            usuários: totalUsers,
+            certificados: totalCertificates,
           });
         }
       } catch (error) {
@@ -101,6 +100,7 @@ const AdminDashboard = () => {
         setIsLoading(false);
       }
     };
+
     fetchData();
   }, [user]);
 

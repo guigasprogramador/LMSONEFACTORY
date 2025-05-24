@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useLocation } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { getCourses, getModulesByCourseId, getLessonsByModuleId, getModuleById } from "@/services/api/restClient";
 import {
   Dialog,
   DialogContent,
@@ -69,21 +69,22 @@ const AdminLessons = () => {
   const [formData, setFormData] = useState({ ...defaultFormData });
   const [editingLessonId, setEditingLessonId] = useState(null);
 
-  // Carregar todos os cursos - otimizado para carregar mais rápido
+  // Carregar todos os cursos usando o cliente REST
   useEffect(() => {
     const fetchCourses = async () => {
       setIsLoading(true);
       try {
-        // Usando o Supabase diretamente para uma consulta mais rápida
-        const { data, error } = await supabase
-          .from('courses')
-          .select('id, title')
-          .order('title');
+        // Usando o cliente REST para buscar os cursos
+        const coursesData = await getCourses();
         
-        if (error) throw error;
+        // Filtrar apenas os campos necessários para a lista de seleção
+        const simplifiedCourses = coursesData.map(course => ({
+          id: course.id,
+          title: course.title
+        }));
         
-        setCourses(data || []);
-        console.log('Cursos carregados:', data?.length || 0, 'cursos');
+        setCourses(simplifiedCourses);
+        console.log('Cursos carregados:', simplifiedCourses.length, 'cursos');
       } catch (error) {
         console.error('Erro ao carregar cursos:', error);
         toast.error('Erro ao carregar cursos');
@@ -96,7 +97,7 @@ const AdminLessons = () => {
     fetchCourses();
   }, []);
   
-  // Carregar módulos do curso selecionado - otimizado
+  // Carregar módulos do curso selecionado usando o cliente REST
   useEffect(() => {
     const fetchModulesByCourse = async () => {
       if (!selectedCourseId) {
@@ -106,30 +107,25 @@ const AdminLessons = () => {
       
       setIsLoading(true);
       try {
-        // Consulta direta ao Supabase para módulos do curso selecionado
-        const { data, error } = await supabase
-          .from('modules')
-          .select('id, title, course_id, order_number')
-          .eq('course_id', selectedCourseId)
-          .order('order_number');
-        
-        if (error) throw error;
+        // Usando o cliente REST para buscar os módulos do curso
+        const modulesData = await getModulesByCourseId(selectedCourseId);
         
         // Mapear para o formato esperado
-        const modules = (data || []).map(m => ({
-          id: m.id,
-          title: m.title,
-          courseId: m.course_id,
-          order: m.order_number
+        const mappedModules = modulesData.map(mod => ({
+          id: mod.id,
+          title: mod.title,
+          order: mod.order,
+          courseId: selectedCourseId
         }));
         
-        setFilteredModules(modules);
-        console.log('Módulos filtrados:', modules.length, 'para o curso', selectedCourseId);
+        // Ordenar por ordem
+        const sortedModules = [...mappedModules].sort((a, b) => a.order - b.order);
         
-        // Se temos módulos e nenhum está selecionado, selecionamos o primeiro
-        if (modules.length > 0 && !selectedModuleId) {
-          setSelectedModuleId(modules[0].id);
-          fetchModuleAndLessons(modules[0].id);
+        setFilteredModules(sortedModules);
+        
+        // Se temos um módulo ID da URL e este é a primeira carga, selecionamos ele
+        if (moduleIdFromUrl && !selectedModuleId && sortedModules.some(m => m.id === moduleIdFromUrl)) {
+          setSelectedModuleId(moduleIdFromUrl);
         }
       } catch (error) {
         console.error('Erro ao carregar módulos do curso:', error);
@@ -141,10 +137,8 @@ const AdminLessons = () => {
     };
     
     fetchModulesByCourse();
-  }, [selectedCourseId]);
+  }, [selectedCourseId, moduleIdFromUrl, selectedModuleId]);
 
-  // Este useEffect foi removido pois a funcionalidade foi movida para o fetchModulesByCourse acima
-  
   // Quando o módulo selecionado muda, carregamos suas aulas
   useEffect(() => {
     if (selectedModuleId) {
@@ -160,49 +154,40 @@ const AdminLessons = () => {
     
     setIsLoading(true);
     try {
-      // Buscar informações do módulo diretamente do Supabase
-      const { data: moduleData, error: moduleError } = await supabase
-        .from('modules')
-        .select('id, title, description, course_id, order_number')
-        .eq('id', moduleId)
-        .single();
-      
-      if (moduleError) throw moduleError;
+      // Buscar informações do módulo usando o cliente REST
+      const moduleData = await getModuleById(moduleId);
       
       // Mapear para o formato esperado
-      const mod = moduleData ? {
+      const mod = {
         id: moduleData.id,
         title: moduleData.title,
         description: moduleData.description || '',
-        courseId: moduleData.course_id,
-        order: moduleData.order_number
-      } : null;
+        courseId: moduleData.courseId,
+        order: moduleData.order
+      };
       
       setModule(mod);
       
-      // Buscar aulas diretamente do Supabase para melhor performance
-      const { data: lessonsData, error: lessonsError } = await supabase
-        .from('lessons')
-        .select('id, title, description, video_url, content, order_number, module_id, duration')
-        .eq('module_id', moduleId)
-        .order('order_number');
-      
-      if (lessonsError) throw lessonsError;
+      // Buscar aulas usando o cliente REST
+      const lessonsData = await getLessonsByModuleId(moduleId);
       
       // Mapear para o formato esperado
-      const lessons = (lessonsData || []).map(lesson => ({
+      const lessons = lessonsData.map(lesson => ({
         id: lesson.id,
         title: lesson.title,
         description: lesson.description || '',
-        videoUrl: lesson.video_url || '',
+        videoUrl: lesson.videoUrl || '',
         content: lesson.content || '',
-        order: lesson.order_number,
-        moduleId: lesson.module_id,
+        order: lesson.order,
+        moduleId: lesson.moduleId,
         duration: lesson.duration || ''
       }));
       
-      setLessons(lessons);
-      console.log(`Carregadas ${lessons.length} aulas para o módulo ${moduleId}`);
+      // Ordenar por ordem
+      const sortedLessons = [...lessons].sort((a, b) => a.order - b.order);
+      
+      setLessons(sortedLessons);
+      console.log(`Carregadas ${sortedLessons.length} aulas para o módulo ${moduleId}`);
     } catch (error) {
       console.error('Erro ao carregar dados do módulo ou aulas:', error);
       toast.error("Erro ao carregar dados do módulo ou aulas");

@@ -1,9 +1,8 @@
 import { useState, useEffect } from "react";
 import { User } from "@/types";
 import { userService } from "@/services/api";
-import { directProfileService } from "@/services/directProfileService";
-import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { fetchWithAuth } from '@/services/api/restClient';
 
 export interface UserFormData {
   name: string;
@@ -34,70 +33,23 @@ export function useUserManagement() {
       setIsLoading(true);
       console.log('Buscando usuários...');
       
-      // Abordagem 1: Usar o serviço direto de perfis (mais confiável)
+      // Usar o serviço de usuários que agora aponta para a API MySQL
       try {
-        console.log('Tentando buscar usuários com o serviço direto de perfis...');
-        const profilesData = await directProfileService.getAllProfiles();
-        
-        if (profilesData && profilesData.length > 0) {
-          console.log(`Sucesso! Encontrados ${profilesData.length} usuários com o serviço direto`);
-          setUsers(profilesData);
-          return;
-        } else {
-          console.log('Nenhum usuário encontrado com o serviço direto, tentando método alternativo...');
-        }
-      } catch (directError) {
-        console.error('Erro ao buscar com serviço direto:', directError);
-      }
-      
-      // Abordagem 2: Usar o serviço padrão como fallback
-      try {
-        console.log('Tentando buscar usuários com o serviço padrão...');
+        console.log('Buscando usuários da API MySQL...');
         const usersData = await userService.getUsers();
         
         if (usersData && usersData.length > 0) {
-          console.log(`Sucesso! Encontrados ${usersData.length} usuários com o serviço padrão`);
+          console.log(`Sucesso! Encontrados ${usersData.length} usuários`);
           setUsers(usersData);
-          return;
         } else {
-          console.log('Nenhum usuário encontrado com o serviço padrão');
+          console.log('Nenhum usuário encontrado');
+          setUsers([]);
         }
-      } catch (standardError) {
-        console.error('Erro ao buscar com serviço padrão:', standardError);
+      } catch (error) {
+        console.error('Erro ao buscar usuários:', error);
+        toast.error("Não foi possível carregar a lista de usuários");
+        setUsers([]);
       }
-      
-      // Abordagem 3: Buscar diretamente do Supabase como último recurso
-      try {
-        console.log('Tentando buscar diretamente do Supabase...');
-        const { data, error } = await supabase.from('profiles').select('*');
-        
-        if (error) {
-          console.error('Erro ao buscar diretamente do Supabase:', error);
-        } else if (data && data.length > 0) {
-          console.log(`Sucesso! Encontrados ${data.length} perfis diretamente do Supabase`);
-          
-          const formattedUsers = data.map(profile => ({
-            id: profile.id,
-            name: profile.name || 'Usuário',
-            email: profile.email || '',
-            role: profile.role || 'student',
-            avatarUrl: profile.avatar_url || '',
-            createdAt: profile.created_at || new Date().toISOString()
-          }));
-          
-          setUsers(formattedUsers);
-          return;
-        } else {
-          console.log('Nenhum perfil encontrado diretamente do Supabase');
-        }
-      } catch (supabaseError) {
-        console.error('Erro ao buscar diretamente do Supabase:', supabaseError);
-      }
-      
-      // Se chegou aqui, todas as tentativas falharam
-      console.warn('Todas as abordagens falharam ao buscar usuários');
-      toast.error("Não foi possível carregar a lista de usuários");
-      setUsers([]);
     } catch (error) {
       console.error("Erro geral ao buscar usuários:", error);
       toast.error("Erro ao carregar usuários");

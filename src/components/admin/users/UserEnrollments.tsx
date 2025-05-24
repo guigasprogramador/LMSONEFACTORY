@@ -11,8 +11,8 @@ import {
 import { User } from "@/types";
 import { School } from "lucide-react";
 import CourseSelector from "./CourseSelector";
-import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { fetchWithAuth } from "@/services/api/restClient";
 
 interface UserEnrollmentsProps {
   user: User;
@@ -35,39 +35,22 @@ const UserEnrollments = ({ user }: UserEnrollmentsProps) => {
 
     setIsLoading(true);
     try {
-      // Buscar matrículas do usuário
-      const { data: enrollmentData, error: enrollmentError } = await supabase
-        .from('enrollments')
-        .select('course_id, progress, enrolled_at')
-        .eq('user_id', user.id);
-
-      if (enrollmentError) {
-        console.error('Erro ao buscar matrículas:', enrollmentError);
-        toast.error('Erro ao carregar matrículas do usuário');
-        return;
-      }
-
+      // Buscar matrículas do usuário usando a API REST
+      const enrollmentData = await fetchWithAuth(`/api/enrollments?user_id=${user.id}`);
+      
       if (!enrollmentData || enrollmentData.length === 0) {
         setEnrollments([]);
         return;
       }
-
+      
       // Buscar informações dos cursos
       const courseIds = enrollmentData.map(e => e.course_id);
-      const { data: coursesData, error: coursesError } = await supabase
-        .from('courses')
-        .select('id, title')
-        .in('id', courseIds);
-
-      if (coursesError) {
-        console.error('Erro ao buscar cursos:', coursesError);
-        toast.error('Erro ao carregar informações dos cursos');
-        return;
-      }
-
+      const coursesData = await fetchWithAuth('/api/courses');
+      const filteredCourses = coursesData.filter(course => courseIds.includes(course.id));
+      
       // Combinar dados de matrículas com informações dos cursos
       const enrollmentsWithCourseInfo = enrollmentData.map(enrollment => {
-        const course = coursesData?.find(c => c.id === enrollment.course_id);
+        const course = filteredCourses.find(c => c.id === enrollment.course_id);
         return {
           id: enrollment.course_id,
           title: course?.title || 'Curso não encontrado',

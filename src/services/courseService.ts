@@ -1,6 +1,40 @@
-import { Course, Module, Lesson, CourseForAdmin } from '@/types';
-import { supabase } from '@/integrations/supabase/client';
+import { Course, Module, Lesson } from '@/types';
+
+// Interface para dados administrativos de cursos
+interface CourseForAdmin {
+  id: string;
+  title: string;
+  description: string;
+  thumbnail: string;
+  duration: string;
+  instructor: string;
+  rating: number;
+  createdAt: string;
+  updatedAt: string;
+  enrollmentCount: number;
+  moduleCount: number;
+}
 import { requestQueue } from '@/utils/requestQueue';
+import * as api from './api/restClient';
+
+// Aviso de compatibilidade para funções que ainda podem tentar usar o Supabase
+import { supabase } from '@/integrations/supabase/client';
+// Substituir métodos do Supabase para evitar erros
+if (supabase) {
+  supabase.from = (table: string) => {
+    console.warn(`Aviso: Tentativa de usar supabase.from('${table}').select() - Esta função não está disponível na migração para MySQL. Use os métodos da API REST em src/services/api/restClient.ts`);
+    return {
+      select: () => ({
+        eq: () => ({
+          single: () => ({ data: null, error: { message: 'Método não disponível na migração MySQL' } })
+        }),
+        order: () => ({
+          data: null, error: { message: 'Método não disponível na migração MySQL' }
+        })
+      })
+    };
+  };
+}
 
 // Interface para o tipo retornado pelo Supabase na busca aninhada para getCourseById
 interface CourseWithRelationsDB {
@@ -45,6 +79,8 @@ interface CourseForAdminDB {
   enrollments: { id: string }[] | null; // Relação para contagem de matrículas
   modules: { id: string }[] | null; // Relação para contagem de módulos
 }
+
+
 
 const courseService = {
   async getCourses(): Promise<Course[]> {
@@ -196,15 +232,10 @@ const courseService = {
   },
 
   async deleteCourse(courseId: string): Promise<void> {
-    if (!courseId) throw new Error('ID do curso é obrigatório');
-
     try {
-      const { error } = await supabase
-        .from('courses')
-        .delete()
-        .eq('id', courseId);
-
-      if (error) throw error;
+      console.log('Excluindo curso usando API MySQL');
+      // Usar a implementação já existente do restClient
+      await api.deleteCourse(courseId);
     } catch (error) {
       console.error('Erro ao excluir curso:', error);
       throw new Error('Falha ao excluir curso');
@@ -215,103 +246,36 @@ const courseService = {
     if (!courseId) throw new Error('ID do curso é obrigatório');
 
     try {
-      // Buscar o curso básico primeiro
-      const { data: courseData, error: courseError } = await requestQueue.enqueue(async () => {
-        const response = await supabase
-          .from('courses')
-          .select('*')
-          .eq('id', courseId)
-          .single();
-        return response;
-      });
+      console.log('Buscando curso por ID usando API MySQL:', courseId);
       
-      if (courseError) {
-        console.error('Erro ao buscar dados básicos do curso:', courseError);
-        if (courseError.code === 'PGRST116') {
-          console.log('Curso não encontrado para ID:', courseId);
-          return null;
-        }
-        throw courseError;
-      }
+      // Usar a implementação já existente do restClient
+      const course = await api.getCourseById(courseId);
       
-      if (!courseData) {
-        console.log('Curso não encontrado para ID:', courseId);
-        return null;
-      }
+      // Buscar módulos do curso
+      const modules = await api.getModulesByCourseId(courseId);
       
-      // Buscar matrículas separadamente
-      const { data: enrollmentsData } = await supabase
-        .from('enrollments')
-        .select('id')
-        .eq('course_id', courseId);
-        
-      // Buscar módulos separadamente
-      const { data: modulesData, error: modulesError } = await supabase
-        .from('modules')
-        .select('id, title, description, order_number')
-        .eq('course_id', courseId)
-        .order('order_number', { ascending: true });
-        
-      if (modulesError) {
-        console.error('Erro ao buscar módulos do curso:', modulesError);
-        throw modulesError;
-      }
-      
-      // Formatar os dados do curso
+      // Formatar os módulos com suas aulas
       const formattedModules: Module[] = [];
       
       // Buscar aulas para cada módulo
-      if (modulesData && modulesData.length > 0) {
-        for (const module of modulesData) {
-          const { data: lessonsData, error: lessonsError } = await supabase
-            .from('lessons')
-            .select('id, title, description, duration, video_url, content, order_number')
-            .eq('module_id', module.id)
-            .order('order_number', { ascending: true });
-            
-          if (lessonsError) {
-            console.error(`Erro ao buscar aulas do módulo ${module.id}:`, lessonsError);
-            continue; // Continuar com o próximo módulo mesmo se houver erro
-          }
+      if (modules && modules.length > 0) {
+        for (const module of modules) {
+          const lessons = await api.getLessonsByModuleId(module.id);
           
           formattedModules.push({
-            id: module.id,
-            courseId: courseId,
-            title: module.title,
-            description: module.description || '',
-            order: module.order_number,
-            lessons: (lessonsData || []).map(lesson => ({
-              id: lesson.id,
-              moduleId: module.id,
-              title: lesson.title || '',
-              description: lesson.description || '',
-              duration: lesson.duration || '',
-              videoUrl: lesson.video_url || '',
-              content: lesson.content || '',
-              order: lesson.order_number || 0,
-              isCompleted: false
-            }))
+            ...module,
+            lessons: lessons || []
           });
         }
       }
       
-      // Construir o objeto do curso
+      // Construir o objeto do curso completo
       return {
-        id: courseData.id,
-        title: courseData.title,
-        description: courseData.description || '',
-        thumbnail: courseData.thumbnail || '/placeholder.svg',
-        duration: courseData.duration || '',
-        instructor: courseData.instructor,
-        enrolledCount: enrollmentsData ? enrollmentsData.length : 0,
-        rating: courseData.rating || 0,
+        ...course,
         modules: formattedModules,
-        createdAt: courseData.created_at,
-        updatedAt: courseData.updated_at,
         isEnrolled: false, // Será atualizado pelo contexto do usuário
         progress: 0 // Será atualizado pelo contexto do usuário
       };
-
 
     } catch (error) {
       console.error('Erro geral ao buscar curso por ID:', error);
@@ -322,39 +286,27 @@ const courseService = {
   // Função para buscar todos os cursos para a área administrativa
   async getCoursesForAdmin(): Promise<CourseForAdmin[]> {
     try {
-      const { data, error } = await requestQueue.enqueue(async () => {
-        const response = await supabase
-          .from('courses')
-          .select('*, enrollments(id), modules(id)') // Incluir apenas IDs de matrículas e módulos para contagem
-          .order('created_at', { ascending: false });
-        return response;
-      });
-
-      if (error) {
-        console.error('Erro ao buscar cursos para admin:', error);
-        throw error; // Propagar o error
-      }
-
-      // Mapear os dados para o formato esperado (CourseForAdmin)
-      const formattedCourses: CourseForAdmin[] = (data || []).map((course) => ({
+      console.log('Buscando cursos para admin usando API MySQL');
+      // Buscar todos os cursos
+      const courses = await api.getCourses();
+      
+      // Formatar para o formato esperado na área administrativa
+      return courses.map(course => ({
         id: course.id,
         title: course.title,
-        description: course.description || '',
-        thumbnail: course.thumbnail || '/placeholder.svg',
-        duration: course.duration || '',
+        description: course.description,
+        thumbnail: course.thumbnail,
+        duration: course.duration,
         instructor: course.instructor,
+        enrollmentCount: course.enrolledCount || 0,
+        moduleCount: course.modules?.length || 0,
         rating: course.rating || 0,
-        createdAt: course.created_at,
-        updatedAt: course.updated_at,
-        // Contar matrículas e módulos a partir dos relacionamentos aninhados
-        enrolledCount: course.enrollments ? course.enrollments.length : 0,
-        modulesCount: course.modules ? course.modules.length : 0,
+        createdAt: course.createdAt,
+        updatedAt: course.updatedAt,
       }));
-
-      return formattedCourses;
     } catch (error) {
-      console.error('Erro geral ao buscar cursos para admin:', error);
-      throw new Error('Falha ao buscar cursos para a administração');
+      console.error('Erro ao buscar cursos para admin:', error);
+      throw new Error('Falha ao carregar cursos para admin');
     }
   }
 };

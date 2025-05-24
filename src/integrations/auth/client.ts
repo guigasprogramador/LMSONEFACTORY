@@ -1,14 +1,21 @@
 import { Database } from '@/types/database';
-import { User } from '@/types/user';
+// Importar o tipo User diretamente em vez de usar o caminho @/types/user
+import { User } from '../../types/user';
 import { requestThrottler } from '@/utils/requestThrottler';
 
 // Configurau00e7u00e3o da API
-const API_URL = process.env.REACT_APP_API_URL || 'https://sua-api-azure.com/api'; // Substitua pela URL da sua API
+// URL da API - definida como localhost para desenvolvimento
+const API_URL = 'http://localhost:3000'; // URL local para desenvolvimento
+
+// Tipo para eventos de mudanu00e7a de autenticau00e7u00e3o
+type AuthChangeEvent = 'SIGNED_IN' | 'SIGNED_OUT' | 'TOKEN_REFRESHED' | 'USER_UPDATED';
+type AuthChangeCallback = (event: AuthChangeEvent, session: any) => void;
 
 // Classe para gerenciar autenticau00e7u00e3o
 class AuthClient {
   private token: string | null = null;
   private user: User | null = null;
+  private authChangeCallbacks: AuthChangeCallback[] = [];
   
   constructor() {
     // Recuperar token do localStorage ao inicializar
@@ -22,6 +29,154 @@ class AuthClient {
       } catch (e) {
         console.error('Erro ao recuperar usuu00e1rio do localStorage:', e);
       }
+    }
+  }
+  
+  // Mu00e9todos adicionados para compatibilidade com o adaptador Supabase
+  getCurrentUser = async (): Promise<User | null> => {
+    if (this.user) return this.user;
+    
+    // Se nu00e3o temos o usuu00e1rio em memu00f3ria mas temos o token, tenta buscar
+    if (this.token) {
+      try {
+        const { data } = await this.auth.getUser();
+        return data;
+      } catch (error) {
+        console.error('Erro ao obter usuu00e1rio atual:', error);
+        return null;
+      }
+    }
+    
+    return null;
+  }
+  
+  getToken = (): string | null => {
+    return this.token;
+  }
+  
+  onAuthChange = (callback: AuthChangeCallback) => {
+    this.authChangeCallbacks.push(callback);
+    
+    // Retorna uma funu00e7u00e3o para cancelar a inscriu00e7u00e3o
+    return () => {
+      const index = this.authChangeCallbacks.indexOf(callback);
+      if (index !== -1) {
+        this.authChangeCallbacks.splice(index, 1);
+      }
+    };
+  }
+  
+  // Notificar todos os callbacks sobre mudanu00e7as de autenticau00e7u00e3o
+  private notifyAuthChange = (event: AuthChangeEvent) => {
+    const session = this.token ? { user: this.user, access_token: this.token } : null;
+    this.authChangeCallbacks.forEach(callback => callback(event, session));
+  }
+  
+  // Login com email e senha
+  login = async (email: string, password: string) => {
+    try {
+      const response = await fetch(`${API_URL}/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ email, password })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Falha ao fazer login');
+      }
+      
+      const data = await response.json();
+      
+      // Salvar token e usuu00e1rio
+      this.token = data.token;
+      this.user = data.user;
+      
+      // Persistir no localStorage
+      localStorage.setItem('lms-auth-token-v2', data.token);
+      localStorage.setItem('lms-user', JSON.stringify(data.user));
+      
+      // Notificar sobre a mudanu00e7a de autenticau00e7u00e3o
+      this.notifyAuthChange('SIGNED_IN');
+      
+      return data;
+    } catch (error: any) {
+      console.error('Erro ao fazer login:', error);
+      throw error;
+    }
+  }
+  
+  // Registro de novo usuu00e1rio
+  register = async ({ email, password, username, metadata }: { email: string, password: string, username?: string, metadata?: any }) => {
+    try {
+      const response = await fetch(`${API_URL}/auth/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ 
+          email, 
+          password, 
+          username: username || email.split('@')[0],
+          metadata
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Falha ao registrar');
+      }
+      
+      const data = await response.json();
+      
+      // Salvar token e usuu00e1rio
+      this.token = data.token;
+      this.user = data.user;
+      
+      // Persistir no localStorage
+      localStorage.setItem('lms-auth-token-v2', data.token);
+      localStorage.setItem('lms-user', JSON.stringify(data.user));
+      
+      // Notificar sobre a mudanu00e7a de autenticau00e7u00e3o
+      this.notifyAuthChange('SIGNED_IN');
+      
+      return data;
+    } catch (error: any) {
+      console.error('Erro ao registrar:', error);
+      throw error;
+    }
+  }
+  
+  // Logout
+  logout = async () => {
+    try {
+      // Se temos token, notificar o servidor
+      if (this.token) {
+        await fetch(`${API_URL}/auth/logout`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this.token}`
+          }
+        });
+      }
+      
+      // Limpar dados locais
+      this.token = null;
+      this.user = null;
+      
+      // Remover do localStorage
+      localStorage.removeItem('lms-auth-token-v2');
+      localStorage.removeItem('lms-user');
+      
+      // Notificar sobre a mudanu00e7a de autenticau00e7u00e3o
+      this.notifyAuthChange('SIGNED_OUT');
+      
+      return { success: true };
+    } catch (error: any) {
+      console.error('Erro ao fazer logout:', error);
+      throw error;
     }
   }
   

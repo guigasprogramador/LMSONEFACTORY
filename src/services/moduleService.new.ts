@@ -1,27 +1,31 @@
 import { Module, Lesson } from '@/types';
-import { supabase } from '@/integrations/supabase/client';
 import { requestQueue } from '@/utils/requestQueue';
 import { cacheManager } from '@/utils/cacheManager';
+import { getModulesByCourseId as apiGetModulesByCourseId, createModule as apiCreateModule, updateModule as apiUpdateModule, deleteModule as apiDeleteModule, getLessonsByModuleId as apiGetLessonsByModuleId, getCourses, getModuleById as apiGetModuleById } from './api/restClient';
 
 export const moduleService = {
   async getAllModules(): Promise<Module[]> {
     try {
-      const { data, error } = await supabase
-        .from('modules')
-        .select('id, title, description, order_number, course_id')
-        .order('title', { ascending: true });
-
-      if (error) throw error;
-      if (!data) throw new Error('Nenhum módulo encontrado');
-
-      return data.map(module => ({
-        id: module.id,
-        title: module.title,
-        description: module.description || '',
-        order: module.order_number,
-        courseId: module.course_id,
-        lessons: []
-      }));
+      // Buscar todos os cursos para obter seus IDs
+      const courses = await getCourses();
+      
+      if (!courses || courses.length === 0) {
+        console.log('Nenhum curso encontrado para buscar módulos');
+        return [];
+      }
+      
+      // Para cada curso, buscar seus módulos
+      const allModulesPromises = courses.map(course => this.getModulesByCourseId(course.id));
+      const modulesArrays = await Promise.all(allModulesPromises);
+      
+      // Combinar todos os arrays de módulos em um único array
+      const allModules = modulesArrays.flat();
+      
+      if (allModules.length === 0) {
+        throw new Error('Nenhum módulo encontrado');
+      }
+      
+      return allModules;
     } catch (error) {
       console.error('Erro ao buscar módulos:', error);
       throw new Error('Falha ao buscar módulos');
@@ -42,22 +46,12 @@ export const moduleService = {
           console.log(`Buscando módulos do curso ${courseId} do servidor...`);
           
           // Buscar os módulos usando a fila de requisições
-          const modulesResponse = await requestQueue.enqueue(async () => {
-            const response = await supabase
-              .from('modules')
-              .select('id, title, description, order_number, course_id')
-              .eq('course_id', courseId)
-              .order('order_number', { ascending: true });
-              
-            return response;
+          const modules = await requestQueue.enqueue(async () => {
+            // Usar o cliente REST para buscar os módulos
+            return await apiGetModulesByCourseId(courseId);
           });
           
-          const modules = modulesResponse.data || [];
-          const modulesError = modulesResponse.error;
-
-          if (modulesError) throw modulesError;
-          
-          if (modules.length === 0) {
+          if (!modules || modules.length === 0) {
             console.log('Nenhum módulo encontrado para o curso:', courseId);
             return []; // Retornar array vazio em vez de lançar erro
           }
@@ -68,51 +62,20 @@ export const moduleService = {
           for (const module of modules) {
             try {
               // Buscar aulas para este módulo usando a fila de requisições
-              const lessonsResponse = await requestQueue.enqueue(async () => {
-                const response = await supabase
-                  .from('lessons')
-                  .select('id, module_id, title, description, duration, video_url, content, order_number')
-                  .eq('module_id', module.id)
-                  .order('order_number', { ascending: true });
-                  
-                return response;
+              const lessons = await requestQueue.enqueue(async () => {
+                // Usar o cliente REST para buscar as aulas
+                return await apiGetLessonsByModuleId(module.id);
               });
-              
-              const lessons = lessonsResponse.data || [];
-              const lessonsError = lessonsResponse.error;
-
-              if (lessonsError) {
-                console.error(`Erro ao buscar aulas para o módulo ${module.id}:`, lessonsError);
-                throw lessonsError;
-              }
 
               modulesWithLessons.push({
-                id: module.id,
-                title: module.title,
-                description: module.description || '',
-                order: module.order_number,
-                courseId: module.course_id,
-                lessons: lessons.map(lesson => ({
-                  id: lesson.id,
-                  moduleId: lesson.module_id,
-                  title: lesson.title,
-                  description: lesson.description || '',
-                  duration: lesson.duration || '',
-                  videoUrl: lesson.video_url || '',
-                  content: lesson.content || '',
-                  order: lesson.order_number,
-                  isCompleted: false
-                }))
+                ...module,
+                lessons: lessons || []
               });
             } catch (error) {
               console.error(`Erro ao processar módulo ${module.id}:`, error);
               // Continuar com os outros módulos mesmo se um falhar
               modulesWithLessons.push({
-                id: module.id,
-                title: module.title,
-                description: module.description || '',
-                order: module.order_number,
-                courseId: module.course_id,
+                ...module,
                 lessons: [] // Sem aulas se houver erro
               });
             }
@@ -152,31 +115,17 @@ export const moduleService = {
     if (!moduleData?.title?.trim()) throw new Error('Título do módulo é obrigatório');
 
     try {
-      const { data, error } = await supabase
-        .from('modules')
-        .insert({
-          course_id: courseId,
-          title: moduleData.title.trim(),
-          description: moduleData.description?.trim() || '',
-          order_number: moduleData.order
-        })
-        .select('id, title, description, order_number, course_id')
-        .single();
-
-      if (error) throw error;
-      if (!data) throw new Error('Nenhum dado retornado após criar o módulo');
+      // Usar o cliente REST para criar o módulo
+      const module = await apiCreateModule(courseId, {
+        title: moduleData.title.trim(),
+        description: moduleData.description?.trim() || '',
+        order: moduleData.order
+      });
 
       // Limpar o cache para este curso
       cacheManager.remove(`modules_${courseId}`);
 
-      return {
-        id: data.id,
-        title: data.title,
-        description: data.description || '',
-        order: data.order_number,
-        courseId: data.course_id,
-        lessons: []
-      };
+      return module;
     } catch (error) {
       console.error('Erro ao criar módulo:', error);
       throw new Error('Falha ao criar módulo');
@@ -187,7 +136,7 @@ export const moduleService = {
     title?: string; 
     description?: string; 
     order?: number 
-  }): Promise<void> {
+  }): Promise<Module> {
     if (!moduleId) throw new Error('ID do módulo é obrigatório');
 
     const updates: Record<string, any> = {};
@@ -204,32 +153,24 @@ export const moduleService = {
     }
     
     if (moduleData.order !== undefined) {
-      updates.order_number = moduleData.order;
+      updates.order = moduleData.order;
+    }
+    
+    // Se não houver atualizações, retornar sem fazer nada
+    if (Object.keys(updates).length === 0) {
+      console.log('Nenhuma atualização fornecida para o módulo:', moduleId);
+      // Buscar o módulo atual para retornar
+      return await apiGetModuleById(moduleId);
     }
 
     try {
-      // Primeiro, obter o módulo para saber o courseId
-      const { data: moduleInfo, error: moduleError } = await supabase
-        .from('modules')
-        .select('course_id')
-        .eq('id', moduleId)
-        .single();
-
-      if (moduleError) throw moduleError;
-      if (!moduleInfo) throw new Error('Módulo não encontrado');
-
-      const courseId = moduleInfo.course_id;
-
-      // Atualizar o módulo
-      const { error } = await supabase
-        .from('modules')
-        .update(updates)
-        .eq('id', moduleId);
-
-      if (error) throw error;
-
-      // Limpar o cache para este curso
-      cacheManager.remove(`modules_${courseId}`);
+      // Atualizar o módulo usando o cliente REST
+      const updatedModule = await apiUpdateModule(moduleId, updates);
+      
+      // Limpar o cache para o curso deste módulo
+      cacheManager.remove(`modules_${updatedModule.courseId}`);
+      
+      return updatedModule;
     } catch (error) {
       console.error('Erro ao atualizar módulo:', error);
       throw new Error('Falha ao atualizar módulo');
@@ -240,28 +181,16 @@ export const moduleService = {
     if (!moduleId) throw new Error('ID do módulo é obrigatório');
 
     try {
-      // Primeiro, obter o módulo para saber o courseId
-      const { data: moduleInfo, error: moduleError } = await supabase
-        .from('modules')
-        .select('course_id')
-        .eq('id', moduleId)
-        .single();
+      // Primeiro, obter o módulo atual para saber a qual curso ele pertence
+      const module = await apiGetModuleById(moduleId);
+      
+      if (!module) throw new Error('Módulo não encontrado');
 
-      if (moduleError) throw moduleError;
-      if (!moduleInfo) throw new Error('Módulo não encontrado');
+      // Excluir o módulo usando o cliente REST
+      await apiDeleteModule(moduleId);
 
-      const courseId = moduleInfo.course_id;
-
-      // Excluir o módulo
-      const { error } = await supabase
-        .from('modules')
-        .delete()
-        .eq('id', moduleId);
-
-      if (error) throw error;
-
-      // Limpar o cache para este curso
-      cacheManager.remove(`modules_${courseId}`);
+      // Limpar o cache para o curso deste módulo
+      cacheManager.remove(`modules_${module.courseId}`);
     } catch (error) {
       console.error('Erro ao excluir módulo:', error);
       throw new Error('Falha ao excluir módulo');

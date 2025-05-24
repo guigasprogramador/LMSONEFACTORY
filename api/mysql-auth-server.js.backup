@@ -1,0 +1,980 @@
+/**
+ * Servidor de autenticau00e7u00e3o para substituir o Supabase
+ * Implementa uma API REST para autenticau00e7u00e3o com MySQL na Azure
+ */
+
+const express = require('express');
+const cors = require('cors');
+const mysql = require('mysql2/promise');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
+require('dotenv').config();
+
+const app = express();
+app.use(express.json());
+app.use(cors());
+
+// Configurau00e7u00e3o do MySQL na Azure
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  port: process.env.DB_PORT,
+  ssl: process.env.DB_SSL === 'true' ? {rejectUnauthorized: false} : false,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+});
+
+// Chave secreta para JWT
+const JWT_SECRET = process.env.JWT_SECRET || 'sua-chave-secreta-muito-segura';
+const JWT_EXPIRY = '7d'; // 7 dias
+
+// Middleware de autenticau00e7u00e3o
+const authenticate = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Token nu00e3o fornecido' });
+  }
+  
+  const token = authHeader.substring(7);
+  
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: 'Token invu00e1lido' });
+  }
+};
+
+// Endpoint de login
+app.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email e senha su00e3o obrigatu00f3rios' });
+  }
+  
+  try {
+    // Usar o procedimento de autenticau00e7u00e3o do banco de dados
+    const [rows] = await pool.execute('CALL auth.authenticate(?, ?)', [email, password]);
+    
+    if (!rows || !rows[0] || rows[0].length === 0) {
+      return res.status(401).json({ error: 'Credenciais invu00e1lidas' });
+    }
+    
+    const user = rows[0][0];
+    
+    // Gerar token JWT
+    const token = jwt.sign(
+      { 
+        id: user.id,
+        email: user.email,
+        role: user.role
+      },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRY }
+    );
+    
+    // Buscar perfil do usuu00e1rio
+    const [profileRows] = await pool.execute(
+      'SELECT * FROM profiles WHERE id = ?',
+      [user.id]
+    );
+    
+    const profile = profileRows.length > 0 ? profileRows[0] : {};
+    
+    // Extrair metadados do usuu00e1rio
+    let userMetadata = {};
+    try {
+      userMetadata = user.user_metadata ? JSON.parse(user.user_metadata) : {};
+    } catch (e) {
+      console.error('Erro ao parsear metadados do usuu00e1rio:', e);
+    }
+    
+    // Retornar dados do usuu00e1rio e token
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        created_at: user.created_at,
+        user_metadata: {
+          name: profile.name || userMetadata.name || user.email.split('@')[0],
+          avatar: profile.avatar_url || userMetadata.avatar,
+          role: user.role || 'student'
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Erro no login:', error);
+    res.status(401).json({ error: 'Credenciais invu00e1lidas' });
+  }
+});
+
+// Endpoint de registro
+app.post('/auth/register', async (req, res) => {
+  const { email, password, metadata = {} } = req.body;
+  
+  console.log('POST /auth/register - Tentativa de registro com email:', email);
+  console.log('Metadata recebido:', JSON.stringify(metadata));
+  
+  if (!email || !password) {
+    console.log('Email ou senha não fornecidos');
+    return res.status(400).json({ error: 'Email e senha su00e3o obrigatu00f3rios' });
+  }
+  
+  try {
+    // Verificar se o usuu00e1rio ju00e1 existe
+    console.log('Verificando se o email já existe:', email);
+    const [existingUsers] = await pool.execute(
+      'SELECT * FROM auth.users WHERE email = ?',
+      [email]
+    );
+    
+    if (existingUsers.length > 0) {
+      console.log('Email já registrado:', email);
+      return res.status(400).json({ error: 'Email ju00e1 registrado' });
+    }
+    
+    // Usar o procedimento de criau00e7u00e3o de usuu00e1rio do banco de dados
+    console.log('Chamando stored procedure auth.create_user');
+    console.log('Paru00e2metros:', [email, '***SENHA***', metadata.role || 'student', JSON.stringify(metadata), metadata.name || email.split('@')[0]]);
+    
+    // Note que o procedimento create_user no esquema auth_schema_final_corrigido.sql tem 5 parâmetros
+    // Incluindo um nome de usuário como último parâmetro
+    const [rows] = await pool.execute(
+      'CALL auth.create_user(?, ?, ?, ?, ?)',
+      [email, password, metadata.role || 'student', JSON.stringify(metadata), metadata.name || email.split('@')[0]]
+    );
+    
+    if (!rows || !rows[0] || rows[0].length === 0) {
+      console.log('Nenhuma linha retornada pela stored procedure');
+      return res.status(500).json({ error: 'Erro ao criar usuu00e1rio' });
+    }
+    
+    const user = rows[0][0];
+    
+    // Gerar token JWT
+    const token = jwt.sign(
+      { 
+        id: user.id,
+        email: user.email,
+        role: user.role
+      },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRY }
+    );
+    
+    // Extrair metadados do usuu00e1rio
+    let userMetadata = {};
+    try {
+      userMetadata = user.user_metadata ? JSON.parse(user.user_metadata) : {};
+    } catch (e) {
+      console.error('Erro ao parsear metadados do usuu00e1rio:', e);
+    }
+    
+    // Retornar dados do usuu00e1rio e token
+    res.status(201).json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        created_at: user.created_at,
+        user_metadata: {
+          name: userMetadata.name || email.split('@')[0],
+          avatar: userMetadata.avatar,
+          role: user.role || 'student'
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Erro no registro:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// Endpoint para obter usuu00e1rio atual
+app.get('/auth/user', authenticate, async (req, res) => {
+  try {
+    // Buscar usuu00e1rio no banco de dados
+    const [rows] = await pool.execute(
+      'CALL auth.get_user_by_id(?)',
+      [req.user.id]
+    );
+    
+    if (!rows || !rows[0] || rows[0].length === 0) {
+      return res.status(404).json({ error: 'Usuu00e1rio nu00e3o encontrado' });
+    }
+    
+    const user = rows[0][0];
+    
+    // Buscar perfil do usuu00e1rio
+    const [profileRows] = await pool.execute(
+      'SELECT * FROM profiles WHERE id = ?',
+      [user.id]
+    );
+    
+    const profile = profileRows.length > 0 ? profileRows[0] : {};
+    
+    // Extrair metadados do usuu00e1rio
+    let userMetadata = {};
+    try {
+      userMetadata = user.user_metadata ? JSON.parse(user.user_metadata) : {};
+    } catch (e) {
+      console.error('Erro ao parsear metadados do usuu00e1rio:', e);
+    }
+    
+    // Retornar dados do usuu00e1rio
+    res.json({
+      id: user.id,
+      email: user.email,
+      created_at: user.created_at,
+      user_metadata: {
+        name: profile.name || userMetadata.name || user.email.split('@')[0],
+        avatar: profile.avatar_url || userMetadata.avatar,
+        role: user.role || 'student'
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao buscar usuu00e1rio:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// Endpoint para atualizar usuu00e1rio
+app.patch('/auth/user', authenticate, async (req, res) => {
+  const { name, avatar, role, ...otherMetadata } = req.body;
+  
+  try {
+    // Atualizar metadados do usuu00e1rio
+    const metadata = {
+      name,
+      avatar,
+      role,
+      ...otherMetadata
+    };
+    
+    const [rows] = await pool.execute(
+      'CALL auth.update_user_metadata(?, ?)',
+      [req.user.id, JSON.stringify(metadata)]
+    );
+    
+    if (!rows || !rows[0] || rows[0].length === 0) {
+      return res.status(404).json({ error: 'Usuu00e1rio nu00e3o encontrado' });
+    }
+    
+    const user = rows[0][0];
+    
+    // Atualizar perfil
+    await pool.execute(
+      'UPDATE profiles SET name = ?, avatar_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [name, avatar, req.user.id]
+    );
+    
+    // Extrair metadados do usuu00e1rio
+    let userMetadata = {};
+    try {
+      userMetadata = user.user_metadata ? JSON.parse(user.user_metadata) : {};
+    } catch (e) {
+      console.error('Erro ao parsear metadados do usuu00e1rio:', e);
+    }
+    
+    // Retornar dados atualizados
+    res.json({
+      id: user.id,
+      email: user.email,
+      created_at: user.created_at,
+      user_metadata: {
+        name: name || userMetadata.name || user.email.split('@')[0],
+        avatar,
+        role: user.role || 'student',
+        ...otherMetadata
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao atualizar usuu00e1rio:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// Endpoint para verificar sessu00e3o
+app.get('/auth/session', authenticate, (req, res) => {
+  res.json({
+    user_id: req.user.id,
+    expires_at: new Date(req.user.exp * 1000).toISOString()
+  });
+});
+
+// Endpoint para renovar token
+app.post('/auth/refresh', authenticate, async (req, res) => {
+  try {
+    // Buscar usuu00e1rio no banco de dados
+    const [rows] = await pool.execute(
+      'CALL auth.get_user_by_id(?)',
+      [req.user.id]
+    );
+    
+    if (!rows || !rows[0] || rows[0].length === 0) {
+      return res.status(404).json({ error: 'Usuu00e1rio nu00e3o encontrado' });
+    }
+    
+    const user = rows[0][0];
+    
+    // Gerar novo token JWT
+    const token = jwt.sign(
+      { 
+        id: user.id,
+        email: user.email,
+        role: user.role
+      },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRY }
+    );
+    
+    // Buscar perfil do usuu00e1rio
+    const [profileRows] = await pool.execute(
+      'SELECT * FROM profiles WHERE id = ?',
+      [user.id]
+    );
+    
+    const profile = profileRows.length > 0 ? profileRows[0] : {};
+    
+    // Extrair metadados do usuu00e1rio
+    let userMetadata = {};
+    try {
+      userMetadata = user.user_metadata ? JSON.parse(user.user_metadata) : {};
+    } catch (e) {
+      console.error('Erro ao parsear metadados do usuu00e1rio:', e);
+    }
+    
+    // Retornar novo token e dados do usuu00e1rio
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        created_at: user.created_at,
+        user_metadata: {
+          name: profile.name || userMetadata.name || user.email.split('@')[0],
+          avatar: profile.avatar_url || userMetadata.avatar,
+          role: user.role || 'student'
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao renovar token:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// Endpoint para logout
+app.post('/auth/logout', authenticate, (req, res) => {
+  // No lado do servidor, nu00e3o precisamos fazer nada alu00e9m de validar o token
+  // O cliente u00e9 responsu00e1vel por remover o token do armazenamento local
+  res.json({ success: true });
+});
+
+
+
+// Endpoint para listar usuários (apenas para administradores)
+app.get('/auth/admin/users', authenticate, async (req, res) => {
+  try {
+    console.log('GET /auth/admin/users - Tentando listar usuários');
+    console.log('User ID autenticado:', req.user.id);
+    
+    // Verificar se o usuário é admin diretamente na tabela em vez de usar a função is_admin()
+    console.log('Verificando se o usuário é admin diretamente na tabela');
+    try {
+      // Consultar diretamente a tabela auth.users para verificar a role
+      const [userRows] = await pool.query(
+        'SELECT role FROM auth.users WHERE id = ?', 
+        [req.user.id]
+      );
+      
+      console.log('Resultado da verificação de admin:', userRows[0]);
+      
+      if (!userRows.length || userRows[0].role !== 'admin') {
+        console.log('Usuário não é admin, acesso negado');
+        return res.status(403).json({ error: 'Acesso negado: apenas administradores podem acessar este recurso' });
+      }
+    } catch (error) {
+      console.error('Erro ao verificar se o usuário é admin:', error);
+      throw error;
+    }
+    
+    // Chamar a stored procedure list_users do MySQL (de acordo com auth_schema_final_corrigido.sql)
+    console.log('Chamando stored procedure auth.list_users');
+    const [rows] = await pool.query('CALL auth.list_users()');
+    
+    if (!rows || !rows[0]) {
+      console.log('Nenhum usuário encontrado');
+      return res.json([]);
+    }
+    
+    console.log(`Retornando ${rows[0].length} usuários`);
+    res.json(rows[0]);
+  } catch (error) {
+    console.error('Erro ao listar usuários:', error);
+    console.error('Detalhes do erro:', JSON.stringify(error, null, 2));
+    res.status(500).json({ error: 'Erro interno do servidor', details: error.message });
+  }
+});
+
+// Endpoint para criar um novo usuário (apenas para administradores)
+app.post('/auth/admin/users', authenticate, async (req, res) => {
+  try {
+    // Verificar se o usuário é admin diretamente na tabela
+    const [userRows] = await pool.query(
+      'SELECT role FROM auth.users WHERE id = ?', 
+      [req.user.id]
+    );
+    
+    if (!userRows.length || userRows[0].role !== 'admin') {
+      return res.status(403).json({ error: 'Acesso negado: apenas administradores podem criar usuários' });
+    }
+    
+    const { name, email, password, role } = req.body;
+    
+    // Validar dados
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'Nome, email e senha são obrigatórios' });
+    }
+    
+    // Verificar se o email já está em uso
+    const [existingUser] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+    if (existingUser.length > 0) {
+      return res.status(400).json({ error: 'Este email já está em uso' });
+    }
+    
+    // Criptografar a senha
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    // Inserir o novo usuário
+    const [result] = await pool.query(
+      'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)',
+      [name, email, hashedPassword, role || 'student']
+    );
+    
+    // Criar perfil para o usuário
+    if (result.insertId) {
+      await pool.query(
+        'INSERT INTO profiles (user_id, name, email, role) VALUES (?, ?, ?, ?)',
+        [result.insertId, name, email, role || 'student']
+      );
+    }
+    
+    res.status(201).json({
+      id: result.insertId,
+      name,
+      email,
+      role: role || 'student',
+      createdAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Erro ao criar usuário:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// Endpoint para atualizar um usuário existente (apenas para administradores)
+app.put('/auth/admin/users/:userId', authenticate, async (req, res) => {
+  try {
+    // Verificar se o usuário é admin diretamente na tabela
+    const [userRows] = await pool.query(
+      'SELECT role FROM auth.users WHERE id = ?', 
+      [req.user.id]
+    );
+    
+    if (!userRows.length || userRows[0].role !== 'admin') {
+      return res.status(403).json({ error: 'Acesso negado: apenas administradores podem atualizar usuários' });
+    }
+    
+    const userId = req.params.userId;
+    const { name, email, role, password } = req.body;
+    
+    // Verificar se o usuário existe
+    const [existingUser] = await pool.query('SELECT * FROM users WHERE id = ?', [userId]);
+    if (existingUser.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+    
+    // Preparar os campos para atualização
+    const updates = [];
+    const values = [];
+    
+    if (name) {
+      updates.push('name = ?');
+      values.push(name);
+    }
+    
+    if (email) {
+      // Verificar se o novo email já está em uso por outro usuário
+      if (email !== existingUser[0].email) {
+        const [emailCheck] = await pool.query('SELECT * FROM users WHERE email = ? AND id != ?', [email, userId]);
+        if (emailCheck.length > 0) {
+          return res.status(400).json({ error: 'Este email já está em uso por outro usuário' });
+        }
+      }
+      updates.push('email = ?');
+      values.push(email);
+    }
+    
+    if (role) {
+      updates.push('role = ?');
+      values.push(role);
+    }
+    
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      updates.push('password_hash = ?');
+      values.push(hashedPassword);
+    }
+    
+    // Adicionar userId ao final dos valores
+    values.push(userId);
+    
+    // Atualizar o usuário se houver atualizações
+    if (updates.length > 0) {
+      await pool.query(
+        `UPDATE users SET ${updates.join(', ')} WHERE id = ?`,
+        values
+      );
+      
+      // Atualizar também o perfil do usuário para manter consistência
+      if (name || email || role) {
+        const profileUpdates = [];
+        const profileValues = [];
+        
+        if (name) {
+          profileUpdates.push('name = ?');
+          profileValues.push(name);
+        }
+        
+        if (email) {
+          profileUpdates.push('email = ?');
+          profileValues.push(email);
+        }
+        
+        if (role) {
+          profileUpdates.push('role = ?');
+          profileValues.push(role);
+        }
+        
+        profileValues.push(userId);
+        
+        if (profileUpdates.length > 0) {
+          await pool.query(
+            `UPDATE profiles SET ${profileUpdates.join(', ')} WHERE user_id = ?`,
+            profileValues
+          );
+        }
+      }
+    }
+    
+    // Buscar os dados atualizados do usuário
+    const [updatedUser] = await pool.query('SELECT id, name, email, role, created_at FROM users WHERE id = ?', [userId]);
+    
+    res.json({
+      id: updatedUser[0].id,
+      name: updatedUser[0].name,
+      email: updatedUser[0].email,
+      role: updatedUser[0].role,
+      createdAt: updatedUser[0].created_at
+    });
+  } catch (error) {
+    console.error('Erro ao atualizar usuário:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// Endpoint para excluir um usuário (apenas para administradores)
+app.delete('/auth/admin/users/:userId', authenticate, async (req, res) => {
+  try {
+    // Verificar se o usuário é admin diretamente na tabela
+    const [userRows] = await pool.query(
+      'SELECT role FROM auth.users WHERE id = ?', 
+      [req.user.id]
+    );
+    
+    if (!userRows.length || userRows[0].role !== 'admin') {
+      return res.status(403).json({ error: 'Acesso negado: apenas administradores podem excluir usuários' });
+    }
+    
+    const userId = req.params.userId;
+    
+    // Verificar se o usuário existe
+    const [existingUser] = await pool.query('SELECT * FROM users WHERE id = ?', [userId]);
+    if (existingUser.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+    
+    // Não permitir que um admin exclua a si mesmo
+    if (userId === req.user.id) {
+      return res.status(400).json({ error: 'Você não pode excluir sua própria conta' });
+    }
+    
+    // Excluir o perfil do usuário primeiro (devido à chave estrangeira)
+    await pool.query('DELETE FROM profiles WHERE user_id = ?', [userId]);
+    
+    // Excluir o usuário
+    await pool.query('DELETE FROM users WHERE id = ?', [userId]);
+    
+    res.json({ success: true, message: 'Usuário excluído com sucesso' });
+  } catch (error) {
+    console.error('Erro ao excluir usuário:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// Endpoint para atualizar o papel (role) de um usuário por email (apenas para administradores)
+app.put('/auth/admin/users/role-by-email', authenticate, async (req, res) => {
+  try {
+    // No modo de desenvolvimento, permitir que qualquer usuário atualize papéis
+    console.log('Permitindo atualização de papel de usuário em modo de desenvolvimento');
+    
+    const { email, role } = req.body;
+    
+    if (!email || !role) {
+      return res.status(400).json({ error: 'Email e papel (role) são obrigatórios' });
+    }
+    
+    // Verificar se o usuário existe na tabela profiles
+    const [existingUser] = await pool.query('SELECT * FROM profiles WHERE email = ?', [email]);
+    if (existingUser.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado com este email' });
+    }
+    
+    // Atualizar o papel do usuário na tabela profiles
+    await pool.query('UPDATE profiles SET role = ? WHERE email = ?', [role, email]);
+    
+    console.log(`Papel do usuário ${email} atualizado para ${role} com sucesso!`);
+    
+    res.json({ success: true, message: `Papel do usuário atualizado para ${role}` });
+  } catch (error) {
+    console.error('Erro ao atualizar papel do usuário:', error);
+    res.status(500).json({ error: 'Erro ao atualizar papel do usuário', details: error.message });
+  }
+});
+    
+    const { email, role } = req.body;
+    
+    if (!email || !role) {
+      return res.status(400).json({ error: 'Email e papel (role) são obrigatórios' });
+    }
+    
+    // Verificar se o usuário existe na tabela profiles
+    const [existingUser] = await pool.query('SELECT * FROM profiles WHERE email = ?', [email]);
+    if (existingUser.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado com este email' });
+    }
+    
+    // Atualizar o papel do usuário na tabela profiles
+    await pool.query('UPDATE profiles SET role = ? WHERE email = ?', [role, email]);
+    
+    console.log(`Papel do usuário ${email} atualizado para ${role} com sucesso!`);
+    
+    res.json({ success: true, message: `Papel do usuário atualizado para ${role}` });
+  } catch (error) {
+    console.error('Erro ao atualizar papel do usuário:', error);
+    res.status(500).json({ error: 'Erro ao atualizar papel do usuário', details: error.message });
+  }
+});
+    
+    /* Descomente este código para verificar se o usuário é admin quando estiver em produção
+    // Verificar se o usuário é admin diretamente na tabela
+    const [userRows] = await pool.query(
+      'SELECT role FROM profiles WHERE id = ?', 
+      [req.user.id]
+    );
+    
+    if (!userRows.length || userRows[0].role !== 'admin') {
+      return res.status(403).json({ error: 'Acesso negado: apenas administradores podem atualizar papéis de usuários' });
+    }
+    */
+    
+    const { email, role } = req.body;
+    
+    if (!email || !role) {
+      return res.status(400).json({ error: 'Email e papel (role) são obrigatórios' });
+    }
+    
+    // Verificar se o usuário existe na tabela profiles
+    const [existingUser] = await pool.query('SELECT * FROM profiles WHERE email = ?', [email]);
+    if (existingUser.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado com este email' });
+    }
+    
+    // Atualizar o papel do usuário na tabela profiles
+    await pool.query('UPDATE profiles SET role = ? WHERE email = ?', [role, email]);
+    
+    console.log(`Papel do usuário ${email} atualizado para ${role} com sucesso!`);
+    
+    res.json({ success: true, message: `Papel do usuário atualizado para ${role}` });
+  } catch (error) {
+    console.error('Erro ao buscar certificados:', error);
+    res.status(500).json({ error: 'Erro ao buscar certificados', details: error.message });
+  }
+});
+
+// ============================
+// ENDPOINTS DE CERTIFICADOS
+// ============================
+
+// Obter certificados do usuário
+app.get('/api/certificates', authenticate, async (req, res) => {
+  try {
+    const userId = req.query.user_id;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'ID do usuário é obrigatório' });
+    }
+    
+    console.log(`Buscando certificados do usuário ${userId}`);
+    
+    const [rows] = await pool.query(
+      `SELECT c.*, co.title as course_title, co.thumbnail as course_thumbnail, 
+       p.name as user_name, p.email as user_email
+       FROM certificates c 
+       JOIN courses co ON c.course_id = co.id
+       JOIN profiles p ON c.user_id = p.id
+       WHERE c.user_id = ?`,
+      [userId]
+    );
+    
+    res.json(rows || []);
+  } catch (error) {
+    console.error('Erro ao buscar certificados:', error);
+    res.status(500).json({ error: 'Erro ao buscar certificados', details: error.message });
+  }
+});
+
+// Criar certificado
+app.post('/api/certificates', authenticate, async (req, res) => {
+  try {
+    const { user_id, course_id } = req.body;
+    
+    if (!user_id || !course_id) {
+      return res.status(400).json({ error: 'IDs do usuário e do curso são obrigatórios' });
+    }
+    
+    console.log(`Criando certificado para o usuário ${user_id} no curso ${course_id}`);
+    
+    // Verificar se o usuário já tem certificado neste curso
+    const [existingCerts] = await pool.query(
+      'SELECT * FROM certificates WHERE user_id = ? AND course_id = ?',
+      [user_id, course_id]
+    );
+    
+    if (existingCerts.length > 0) {
+      return res.status(400).json({ error: 'Certificado já existe para este curso' });
+    }
+    
+    // Inserir novo certificado
+    const [result] = await pool.query(
+      'INSERT INTO certificates (user_id, course_id, issue_date) VALUES (?, ?, NOW())',
+      [user_id, course_id]
+    );
+    
+    const [newCert] = await pool.query(
+      'SELECT * FROM certificates WHERE id = ?',
+      [result.insertId]
+    );
+    
+    res.status(201).json(newCert[0]);
+  } catch (error) {
+    console.error('Erro ao criar certificado:', error);
+    res.status(500).json({ error: 'Erro ao criar certificado', details: error.message });
+  }
+});
+
+// ============================
+// ENDPOINTS DE MATRÍCULA (ENROLLMENTS)
+// ============================
+
+// Verificar se um usuário está matriculado em um curso específico
+app.get('/api/enrollments/:userId/:courseId', authenticate, async (req, res) => {
+  try {
+    const { userId, courseId } = req.params;
+    
+    console.log(`Verificando matrícula do usuário ${userId} no curso ${courseId}`);
+    
+    const [rows] = await pool.query(
+      'SELECT * FROM enrollments WHERE user_id = ? AND course_id = ?',
+      [userId, courseId]
+    );
+    
+    if (rows.length > 0) {
+      res.json(rows[0]);
+    } else {
+      res.json(null);
+    }
+  } catch (error) {
+    console.error('Erro ao verificar matrícula:', error);
+    res.status(500).json({ error: 'Erro ao verificar matrícula', details: error.message });
+  }
+});
+
+// Endpoint alternativo para checar matrícula (usar caso haja algum problema com o endpoint original)
+app.get('/api/check-enrollment', authenticate, async (req, res) => {
+  try {
+    const { user_id, course_id } = req.query;
+    
+    if (!user_id || !course_id) {
+      return res.status(400).json({ error: 'IDs do usuário e do curso são obrigatórios' });
+    }
+    
+    console.log(`Verificando matrícula alternativa do usuário ${user_id} no curso ${course_id}`);
+    
+    const [rows] = await pool.query(
+      'SELECT * FROM enrollments WHERE user_id = ? AND course_id = ?',
+      [user_id, course_id]
+    );
+    
+    if (rows.length > 0) {
+      res.json(rows[0]);
+    } else {
+      res.json(null);
+    }
+  } catch (error) {
+    console.error('Erro ao verificar matrícula:', error);
+    res.status(500).json({ error: 'Erro ao verificar matrícula', details: error.message });
+  }
+});
+
+// Obter todas as matrículas de um usuário
+app.get('/api/enrollments', authenticate, async (req, res) => {
+  try {
+    const userId = req.query.user_id;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'ID do usuário é obrigatório' });
+    }
+    
+    console.log(`Buscando matrículas do usuário ${userId}`);
+    
+    const [rows] = await pool.query(
+      'SELECT * FROM enrollments WHERE user_id = ?',
+      [userId]
+    );
+    
+    res.json(rows || []);
+  } catch (error) {
+    console.error('Erro ao buscar matrículas:', error);
+    res.status(500).json({ error: 'Erro ao buscar matrículas', details: error.message });
+  }
+});
+
+// Obter todas as matrículas de um curso
+app.get('/api/enrollments/course/:courseId', authenticate, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    
+    if (!courseId) {
+      return res.status(400).json({ error: 'ID do curso é obrigatório' });
+    }
+    
+    console.log(`Buscando matrículas do curso ${courseId}`);
+    
+    const [rows] = await pool.query(
+      'SELECT e.*, u.email, u.name FROM enrollments e JOIN auth.users u ON e.user_id = u.id WHERE e.course_id = ?',
+      [courseId]
+    );
+    
+    res.json(rows || []);
+  } catch (error) {
+    console.error('Erro ao buscar matrículas do curso:', error);
+    res.status(500).json({ error: 'Erro ao buscar matrículas do curso', details: error.message });
+  }
+});
+
+// Matricular um usuário em um curso
+app.post('/api/enrollments', authenticate, async (req, res) => {
+  try {
+    const { user_id, course_id } = req.body;
+    
+    if (!user_id || !course_id) {
+      return res.status(400).json({ error: 'IDs do usuário e do curso são obrigatórios' });
+    }
+    
+    console.log(`Matriculando usuário ${user_id} no curso ${course_id}`);
+    
+    // Verificar se o usuário já está matriculado
+    const [existingRows] = await pool.query(
+      'SELECT * FROM enrollments WHERE user_id = ? AND course_id = ?',
+      [user_id, course_id]
+    );
+    
+    if (existingRows.length > 0) {
+      return res.status(400).json({ error: 'Usuário já está matriculado neste curso' });
+    }
+    
+    // Gerar UUID para a nova matrícula
+    const [uuidResult] = await pool.query('SELECT UUID() as uuid');
+    const enrollmentId = uuidResult[0].uuid;
+    
+    // Inserir a nova matrícula com UUID específico
+    await pool.query(
+      'INSERT INTO enrollments (id, user_id, course_id, enrolled_at, progress) VALUES (?, ?, ?, NOW(), 0)',
+      [enrollmentId, user_id, course_id]
+    );
+    
+    // Buscar a matrícula inserida
+    const [newEnrollment] = await pool.query(
+      'SELECT * FROM enrollments WHERE id = ?',
+      [enrollmentId]
+    );
+    
+    if (newEnrollment.length === 0) {
+      throw new Error('Erro ao recuperar a nova matrícula');
+    }
+    
+    res.status(201).json(newEnrollment[0]);
+  } catch (error) {
+    console.error('Erro ao matricular usuário:', error);
+    res.status(500).json({ error: 'Erro ao matricular usuário', details: error.message });
+  }
+});
+
+// Atualizar o progresso do aluno em um curso
+app.put('/api/enrollments/progress', authenticate, async (req, res) => {
+  try {
+    const { user_id, course_id, progress } = req.body;
+    
+    if (!user_id || !course_id || progress === undefined) {
+      return res.status(400).json({ error: 'IDs do usuário, do curso e progresso são obrigatórios' });
+    }
+    
+    console.log(`Atualizando progresso do usuário ${user_id} no curso ${course_id} para ${progress}%`);
+    
+    // Verificar se o usuário está matriculado
+    const [existingRows] = await pool.query(
+      'SELECT * FROM enrollments WHERE user_id = ? AND course_id = ?',
+      [user_id, course_id]
+    );
+    
+    if (existingRows.length === 0) {
+      return res.status(404).json({ error: 'Matrícula não encontrada' });
+    }
+    
+    // Atualizar o progresso
+    await pool.query(
+      'UPDATE enrollments SET progress = ? WHERE user_id = ? AND course_id = ?',
+      [progress, user_id, course_id]
+    );
+    
+    res.json({ success: true, message: 'Progresso atualizado com sucesso' });
+  } catch (error) {
+    console.error('Erro ao atualizar progresso do curso:', error);
+    res.status(500).json({ error: 'Erro ao atualizar progresso', details: error.message });
+  }
+});
+
+// Iniciar servidor
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Servidor de autenticau00e7u00e3o rodando na porta ${PORT}`);
+});

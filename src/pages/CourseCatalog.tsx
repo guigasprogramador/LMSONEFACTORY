@@ -119,7 +119,7 @@ const CourseCatalog = () => {
                   <div className="flex items-center gap-2 mt-4">
                     <div className="flex items-center">
                       <div className="mr-1 text-yellow-500">★</div>
-                      <span className="text-sm font-medium">{course.rating.toFixed(1)}</span>
+                      <span className="text-sm font-medium">{typeof course.rating === "number" && !isNaN(course.rating) ? course.rating.toFixed(1) : "0.0"}</span>
                     </div>
                     <div className="text-sm text-muted-foreground">
                       {course.enrolledCount} alunos

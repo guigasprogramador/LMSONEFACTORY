@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { fetchWithAuth } from "@/services/api/restClient";
 import { certificadoService } from "@/services/certificadoService";
 import { 
   Card, 
@@ -12,22 +12,17 @@ import {
   CardTitle 
 } from "@/components/ui/card";
 
-// Função auxiliar para buscar nome do usuário diretamente da autenticação
+// Função auxiliar para buscar nome do usuário da API
 async function getUserNameFromAuth(userId: string) {
   try {
-    // Primeiro verificar se é o usuário atual
-    const { data: authData } = await supabase.auth.getUser();
-    if (authData && authData.user && authData.user.id === userId) {
-      const userName = authData.user.user_metadata?.name || 
-                      authData.user.user_metadata?.full_name;
-      
-      if (userName) {
-        console.log(`Nome encontrado na autenticação: ${userName}`);
-        return userName;
-      }
+    // Buscar o usuário direto da API
+    const userData = await fetchWithAuth(`/api/users/${userId}`);
+    if (userData && userData.name) {
+      console.log(`Nome encontrado na API: ${userData.name}`);
+      return userData.name;
     }
     
-    // Se não for o usuário atual, buscar no banco
+    // Se não encontrar, tentar buscar no perfil
     return null;
   } catch (error) {
     console.error("Erro ao buscar nome da autenticação:", error);
@@ -79,16 +74,23 @@ interface Curso {
   selected?: boolean;
 }
 
+interface User {
+  id: string;
+  name?: string;
+  email?: string;
+}
+
 interface Matricula {
   id: string;
   user_id: string;
   course_id: string;
+  created_at: string;
+  userName: string;
+  courseTitle: string;
   progress: number;
-  userName?: string;
-  courseTitle?: string;
-  hasCertificate?: boolean;
+  hasCertificate: boolean;
   certificateId?: string;
-  selected?: boolean;
+  selected: boolean;
 }
 
 interface Certificado {
@@ -122,31 +124,24 @@ export default function GerenciadorCertificados() {
       try {
         console.log("Iniciando carregamento de dados...");
         
-        // Carregar cursos - consulta simplificada para evitar erros 400
-        const { data: cursosData, error: cursosError } = await supabase
-          .from('courses')
-          .select('id, title')
-          .order('title');
-        
-        if (cursosError) {
-          console.error("Erro ao carregar cursos:", cursosError);
-          toast.error("Erro ao carregar cursos");
-        } else {
+        // Carregar cursos usando a API REST MySQL
+        try {
+          const cursosData = await fetchWithAuth('/api/courses');
           console.log(`Carregados ${cursosData?.length || 0} cursos`);
           setCursos(cursosData || []);
+        } catch (error) {
+          console.error("Erro ao carregar cursos:", error);
+          toast.error("Erro ao carregar cursos");
         }
         
-        // Carregar alunos - consulta atualizada para incluir email e role
-        const { data: alunosData, error: alunosError } = await supabase
-          .from('profiles')
-          .select('id, name, email, role');
-        
-        if (alunosError) {
-          console.error("Erro ao carregar alunos:", alunosError);
-          toast.error("Erro ao carregar alunos");
-        } else {
+        // Carregar alunos usando a API REST MySQL
+        try {
+          const alunosData = await fetchWithAuth('/auth/admin/users');
           console.log(`Carregados ${alunosData?.length || 0} alunos`);
           setAlunos(alunosData || []);
+        } catch (error) {
+          console.error("Erro ao carregar alunos:", error);
+          toast.error("Erro ao carregar alunos");
         }
         
         // Carregar certificados
@@ -174,19 +169,8 @@ export default function GerenciadorCertificados() {
       try {
         console.log(`Carregando matrículas para o curso ${cursoSelecionado}...`);
         
-        // Buscar matrículas para o curso selecionado - consulta simplificada
-        const { data: matriculasData, error: matriculasError } = await supabase
-          .from('enrollments')
-          .select('id, user_id, course_id, progress')
-          .eq('course_id', cursoSelecionado);
-        
-        if (matriculasError) {
-          console.error("Erro ao buscar matrículas:", matriculasError);
-          toast.error("Erro ao buscar matrículas");
-          setCarregando(false);
-          return;
-        }
-        
+        // Buscar matrículas para o curso selecionado
+        const matriculasData = await fetchWithAuth(`/api/enrollments?course_id=${cursoSelecionado}`);
         console.log(`Encontradas ${matriculasData?.length || 0} matrículas`);
         
         if (!matriculasData || matriculasData.length === 0) {
@@ -195,47 +179,58 @@ export default function GerenciadorCertificados() {
           return;
         }
         
-        // Buscar certificados existentes para este curso
-        const { data: certificadosData, error: certificadosError } = await supabase
-          .from('certificates')
-          .select('id, user_id, course_id')
-          .eq('course_id', cursoSelecionado);
+        // Buscar informações dos usuários
+        const usuariosData = await fetchWithAuth('/auth/admin/users') as User[];
+        const usuariosMap = new Map(usuariosData.map(u => [u.id, u]));
         
-        if (certificadosError) {
-          console.error("Erro ao buscar certificados:", certificadosError);
-          toast.error("Erro ao buscar certificados");
-        }
+        // Mapear matrículas com informações dos usuários
+        const matriculasProcessadas = matriculasData.map(matricula => ({
+          ...matricula,
+          userName: usuariosMap.get(matricula.user_id)?.name || 
+                   usuariosMap.get(matricula.user_id)?.email?.split('@')[0] || 
+                   'Usuário não encontrado',
+          courseTitle: cursos.find(c => c.id === matricula.course_id)?.title || 'Curso não encontrado',
+          progress: 100,
+          hasCertificate: false,
+          selected: false
+        }));
         
-        console.log(`Encontrados ${certificadosData?.length || 0} certificados para este curso`);
+        // Verificar certificados existentes para cada matrícula
+        const matriculasComCertificados = await Promise.all(
+          matriculasProcessadas.map(async (matricula) => {
+            try {
+              const certificado = await fetchWithAuth(
+                `/api/certificates/check?user_id=${matricula.user_id}&course_id=${matricula.course_id}`
+              );
+              
+              // Agora a API retorna null com status 200 quando não encontra o certificado
+              if (!certificado) {
+                return {
+                  ...matricula,
+                  hasCertificate: false,
+                  certificateId: null
+                };
+              }
+              
+              return {
+                ...matricula,
+                hasCertificate: true,
+                certificateId: certificado.id
+              };
+            } catch (error) {
+              console.error(`Erro ao verificar certificado para matrícula ${matricula.id}:`, error);
+              return {
+                ...matricula,
+                hasCertificate: false,
+                certificateId: null
+              };
+            }
+          })
+        );
         
-        // Processar matrículas uma por uma para evitar problemas com Promise.all
-        const matriculasProcessadas = [];
-        
-        for (const matricula of matriculasData) {
-          try {
-            // Encontrar o aluno correspondente
-            const aluno = alunos.find(a => a.id === matricula.user_id);
-            
-            // Verificar se já existe certificado
-            const certificado = (certificadosData || []).find(
-              c => c.user_id === matricula.user_id && c.course_id === matricula.course_id
-            );
-            
-            matriculasProcessadas.push({
-              ...matricula,
-              userName: aluno?.name || 'Aluno não encontrado',
-              courseTitle: cursos.find(c => c.id === matricula.course_id)?.title || 'Curso não encontrado',
-              hasCertificate: !!certificado,
-              certificateId: certificado?.id,
-              selected: false
-            });
-          } catch (itemError) {
-            console.error("Erro ao processar matrícula:", itemError);
-          }
-        }
-        
-        console.log(`Processadas ${matriculasProcessadas.length} matrículas com sucesso`);
-        setMatriculas(matriculasProcessadas);
+        // Atualizar estado com as matrículas processadas
+        setMatriculas(matriculasComCertificados);
+        console.log(`Processadas ${matriculasComCertificados.length} matrículas com sucesso`);
       } catch (error) {
         console.error("Erro ao carregar matrículas:", error);
         toast.error("Erro ao carregar matrículas. Tente novamente mais tarde.");
@@ -252,46 +247,76 @@ export default function GerenciadorCertificados() {
     try {
       console.log("Carregando certificados...");
       
-      // Consulta simplificada para evitar erros 400
-      const { data: certificadosData, error: certificadosError } = await supabase
-        .from('certificates')
-        .select('id, user_id, course_id, issue_date, user_name, course_name')
-        .order('issue_date', { ascending: false });
-      
-      if (certificadosError) {
-        console.error("Erro ao carregar certificados:", certificadosError);
-        toast.error("Erro ao carregar certificados");
-        return;
-      }
+      // Usar a API REST para buscar certificados
+      const certificadosData = await fetchWithAuth('/api/certificates');
       
       console.log(`Encontrados ${certificadosData?.length || 0} certificados`);
       
-      // Processar certificados um por um para evitar problemas
+      // Processar certificados um por um
       const certificadosProcessados = [];
       
       for (const certificado of (certificadosData || [])) {
         try {
-          // Usar os campos user_name e course_name que já existem na tabela certificates
-          // Se não existirem, tentar buscar dos arrays de alunos e cursos
+          // Usar os campos user_name e course_name da API
           const aluno = alunos.find(a => a.id === certificado.user_id);
           const curso = cursos.find(c => c.id === certificado.course_id);
           
           certificadosProcessados.push({
             ...certificado,
-            userName: certificado.user_name || aluno?.name || 'Aluno não encontrado',
-            courseTitle: certificado.course_name || curso?.title || 'Curso não encontrado',
-            created_at: certificado.issue_date // Usando issue_date como created_at
           });
-        } catch (itemError) {
-          console.error("Erro ao processar certificado:", itemError);
+        } catch (error) {
+          console.error("Erro ao processar certificado:", error);
         }
       }
       
-      console.log(`Processados ${certificadosProcessados.length} certificados com sucesso`);
       setCertificados(certificadosProcessados);
     } catch (error) {
       console.error("Erro ao carregar certificados:", error);
-      toast.error("Erro ao carregar certificados. Tente novamente mais tarde.");
+      toast.error("Erro ao carregar certificados");
+    }
+  };
+  
+  // Gerar certificado individual
+  const gerarCertificadoIndividual = async (matricula: Matricula) => {
+    console.log(`Gerando certificado individual para ${matricula.userName}`);
+    try {
+      // Verificar se já existe certificado
+      const certificadoExistente = await fetchWithAuth(
+        `/api/certificates/check?user_id=${matricula.user_id}&course_id=${matricula.course_id}`
+      );
+      
+      if (certificadoExistente) {
+        toast.info("Certificado já existe para este aluno");
+        return;
+      }
+
+      // Criar novo certificado
+      const novoCertificado = await fetchWithAuth('/api/certificates', {
+        method: 'POST',
+        body: JSON.stringify({
+          user_id: matricula.user_id,
+          course_id: matricula.course_id,
+          course_name: matricula.courseTitle,
+          user_name: matricula.userName
+        })
+      });
+      
+      if (!novoCertificado) {
+        throw new Error("Erro ao criar certificado");
+      }
+
+      toast.success("Certificado gerado com sucesso!");
+      // Recarregar as matrículas usando useEffect que monitora cursoSelecionado
+      if (cursoSelecionado) {
+        // Força o recarregamento das matrículas atualizando o estado do curso selecionado
+        setCursoSelecionado(atual => {
+          // Usar o mesmo valor atual, apenas para disparar o efeito
+          return atual;
+        });
+      }
+    } catch (error) {
+      console.error("Erro ao gerar certificado:", error);
+      toast.error("Erro ao gerar certificado. Tente novamente.");
     }
   };
   
@@ -385,28 +410,30 @@ export default function GerenciadorCertificados() {
             continue;
           }
           
-          // Verificar se já existe um certificado
-          const { data: certExistente } = await supabase
-            .from('certificates')
-            .select('id')
-            .eq('user_id', matricula.user_id)
-            .eq('course_id', matricula.course_id)
-            .limit(1);
-          
-          if (certExistente && certExistente.length > 0) {
-            console.log(`Certificado já existe para ${matricula.userName}, pulando...`);
-            sucessos++; // Consideramos como sucesso já que o certificado existe
-            continue;
+          // Verificar se já existe um certificado usando a API REST
+          try {
+            const certExistente = await fetchWithAuth(
+              `/api/certificates/check?user_id=${matricula.user_id}&course_id=${matricula.course_id}`
+            );
+            
+            if (certExistente) {
+              console.log(`Certificado já existe para ${matricula.userName}, pulando...`);
+              sucessos++; // Consideramos como sucesso já que o certificado existe
+              continue;
+            }
+          } catch (error) {
+            console.error(`Erro ao verificar certificado para ${matricula.userName}:`, error);
+            // Continua o fluxo para tentar criar um novo certificado
           }
           
           // Atualizar progresso para 100% se necessário
           if (matricula.progress < 100) {
             console.log(`Atualizando progresso para 100% para ${matricula.userName}`);
-            await supabase
-              .from('enrollments')
-              .update({ progress: 100 })
-              .eq('user_id', matricula.user_id)
-              .eq('course_id', matricula.course_id);
+            await fetchWithAuth(`/api/enrollments/${matricula.user_id}/${matricula.course_id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ progress: 100 })
+            });
           }
           
           // Obter nome do usuário e do curso
@@ -423,24 +450,18 @@ export default function GerenciadorCertificados() {
           } else {
             // Fallback: buscar da tabela profiles
             console.log(`Buscando nome do usuário ${matricula.user_id} da tabela profiles`);
-            const { data: userData, error: userError } = await supabase
-              .from('profiles')
-              .select('name, email')
-              .eq('id', matricula.user_id)
-              .single();
-            
-            if (userError) {
-              console.error(`Erro ao buscar perfil do usuário:`, userError);
+            const userRes = await fetchWithAuth(`/api/users/${matricula.user_id}`);
+            const userData = await userRes.json();
+            if (userRes.status !== 200) {
+              console.error(`Erro ao buscar perfil do usuário:`, userData);
             }
-            
             if (userData && userData.name) {
               userName = userData.name;
               console.log(`Nome do usuário encontrado: ${userName}`);
             } else {
               console.warn(`Nome do usuário não encontrado para ID ${matricula.user_id}, usando valor atual: ${userName}`);
-              // Se ainda estiver como "Aluno não encontrado", tentar usar o email como fallback
               if (userName === 'Aluno não encontrado' && userData && userData.email) {
-                userName = userData.email.split('@')[0]; // Usar parte do email antes do @
+                userName = userData.email.split('@')[0];
                 console.log(`Usando email como fallback para nome: ${userName}`);
               }
             }
@@ -448,12 +469,8 @@ export default function GerenciadorCertificados() {
           
           // Se o nome do curso não estiver disponível, tentar buscar
           if (courseName === 'Curso não encontrado') {
-            const { data: courseData } = await supabase
-              .from('courses')
-              .select('title')
-              .eq('id', matricula.course_id)
-              .single();
-            
+            const courseRes = await fetchWithAuth(`/api/courses/${matricula.course_id}`);
+            const courseData = await courseRes.json();
             if (courseData && courseData.title) {
               courseName = courseData.title;
             }
@@ -461,43 +478,41 @@ export default function GerenciadorCertificados() {
           
           // Criar o certificado diretamente no banco de dados
           const now = new Date().toISOString();
-          const { data: novoCertificado, error: certError } = await supabase
-            .from('certificates')
-            .insert({
+          const certRes = await fetchWithAuth(`/api/certificates`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
               user_id: matricula.user_id,
               course_id: matricula.course_id,
               user_name: userName,
               course_name: courseName,
               issue_date: now
             })
-            .select('id')
-            .single();
-          
-          if (certError) {
-            console.error(`Erro ao criar certificado:`, certError);
+          });
+          const novoCertificado = await certRes.json();
+          if (!certRes.ok) {
+            console.error(`Erro ao criar certificado:`, novoCertificado);
             falhas++;
             continue;
           }
-          
           if (novoCertificado && novoCertificado.id) {
             sucessos++;
             console.log(`Certificado gerado com sucesso: ${novoCertificado.id}`);
-            
-            // Tentar registrar na tabela recent_certificates
             try {
-              await supabase
-                .from('recent_certificates')
-                .insert({
+              await fetchWithAuth(`/api/recent_certificates`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
                   id: novoCertificado.id,
                   user_id: matricula.user_id,
                   course_id: matricula.course_id,
                   user_name: userName,
                   course_name: courseName,
                   issue_date: now
-                });
+                })
+              });
             } catch (recentError) {
               console.error("Erro ao registrar em recent_certificates:", recentError);
-              // Não falhar o processo principal se este registro falhar
             }
           } else {
             falhas++;
@@ -507,54 +522,37 @@ export default function GerenciadorCertificados() {
           falhas++;
           console.error(`Erro ao gerar certificado para ${matricula.userName}:`, error);
         }
-        
         // Atualizar progresso
         const novoProgresso = Math.round(((i + 1) / matriculasSelecionadas.length) * 100);
         setProgresso(novoProgresso);
       }
-      
       // Exibir resultado
       if (sucessos > 0) {
         toast.success(`${sucessos} certificado(s) gerado(s) com sucesso!`);
         console.log(`Gerados ${sucessos} certificados com sucesso.`);
-        
-        // Recarregar dados
         if (cursoSelecionado) {
           console.log("Recarregando dados após geração de certificados...");
-          
           // Buscar matrículas atualizadas
-          const { data: matriculasData, error: matriculasError } = await supabase
-            .from('enrollments')
-            .select('id, user_id, course_id, progress')
-            .eq('course_id', cursoSelecionado);
-          
-          if (matriculasError) {
-            console.error("Erro ao recarregar matrículas:", matriculasError);
+          const matriculasRes = await fetchWithAuth(`/api/enrollments?course_id=${cursoSelecionado}`);
+          const matriculasData = await matriculasRes.json();
+          if (!matriculasRes.ok) {
+            console.error("Erro ao recarregar matrículas:", matriculasData);
           }
-            
           // Buscar certificados atualizados
-          const { data: certificadosData, error: certificadosError } = await supabase
-            .from('certificates')
-            .select('id, user_id, course_id')
-            .eq('course_id', cursoSelecionado);
-          
-          if (certificadosError) {
-            console.error("Erro ao recarregar certificados:", certificadosError);
+          const certificadosRes = await fetchWithAuth(`/api/certificates?course_id=${cursoSelecionado}`);
+          const certificadosData = await certificadosRes.json();
+          if (!certificadosRes.ok) {
+            console.error("Erro ao recarregar certificados:", certificadosData);
           }
-            
           if (matriculasData) {
             console.log(`Recarregadas ${matriculasData.length} matrículas`);
-            
-            // Processar matrículas uma por uma
             const matriculasAtualizadas = [];
-            
             for (const matricula of matriculasData) {
               try {
                 const aluno = alunos.find(a => a.id === matricula.user_id);
                 const certificado = certificadosData?.find(
                   c => c.user_id === matricula.user_id && c.course_id === matricula.course_id
                 );
-                
                 matriculasAtualizadas.push({
                   ...matricula,
                   userName: aluno?.name || 'Aluno não encontrado',
@@ -567,18 +565,14 @@ export default function GerenciadorCertificados() {
                 console.error("Erro ao processar matrícula:", itemError);
               }
             }
-            
             console.log(`Processadas ${matriculasAtualizadas.length} matrículas atualizadas`);
             setMatriculas(matriculasAtualizadas);
             setTodosSelecionados(false);
             setTotalSelecionados(0);
           }
-          
-          // Recarregar certificados
           await carregarCertificados();
         }
       }
-      
       if (falhas > 0) {
         toast.error(`${falhas} certificado(s) não puderam ser gerados.`);
       }
@@ -779,96 +773,57 @@ export default function GerenciadorCertificados() {
                                       console.log(`Gerando certificado individual para ${matricula.userName}`);
                                       
                                       // Verificar se já existe um certificado
-                                      const { data: certExistente } = await supabase
-                                        .from('certificates')
-                                        .select('id')
-                                        .eq('user_id', matricula.user_id)
-                                        .eq('course_id', matricula.course_id)
-                                        .limit(1);
-                                      
-                                      if (certExistente && certExistente.length > 0) {
-                                        console.log(`Certificado já existe: ${certExistente[0].id}`);
-                                        toast.success("Certificado já existe!");
+                                      try {
+                                        const certExistente = await fetchWithAuth(`/api/certificates/check?user_id=${matricula.user_id}&course_id=${matricula.course_id}`);
                                         
-                                        // Atualizar a matrícula na lista
-                                        const matriculasAtualizadas = matriculas.map(m => {
-                                          if (m.id === matricula.id) {
-                                            return {
-                                              ...m,
-                                              hasCertificate: true,
-                                              certificateId: certExistente[0].id,
-                                              selected: false
-                                            };
-                                          }
-                                          return m;
+                                        if (certExistente && certExistente.id) {
+                                          console.log(`Certificado já existe: ${certExistente.id}`);
+                                          toast.success("Certificado já existe!");
+                                          
+                                          // Atualizar a matrícula na lista
+                                          const matriculasAtualizadas = matriculas.map(m => {
+                                            if (m.id === matricula.id) {
+                                              return {
+                                                ...m,
+                                                hasCertificate: true,
+                                                certificateId: certExistente.id,
+                                                selected: false
+                                              };
+                                            }
+                                            return m;
+                                          });
+                                          
+                                          setMatriculas(matriculasAtualizadas);
+                                          await carregarCertificados();
+                                          setProcessando(false);
+                                          return;
+                                        }
+                                        
+                                        // Atualizar progresso para 100%
+                                        await fetchWithAuth(`/api/enrollments/${matricula.id}/progress`, {
+                                          method: 'PUT',
+                                          body: JSON.stringify({ progress: 100 })
                                         });
                                         
-                                        setMatriculas(matriculasAtualizadas);
-                                        await carregarCertificados();
-                                        setProcessando(false);
-                                        return;
-                                      }
-                                      
-                                      // Atualizar progresso para 100%
-                                      await supabase
-                                        .from('enrollments')
-                                        .update({ progress: 100 })
-                                        .eq('user_id', matricula.user_id)
-                                        .eq('course_id', matricula.course_id);
-                                      
-                                      // Primeiro tentar buscar o nome do usuário da autenticação
-                                      console.log(`Tentando buscar nome do usuário ${matricula.user_id} da autenticação`);
-                                      const authName = await getUserNameFromAuth(matricula.user_id);
-                                      
-                                      let userName = matricula.userName;
-                                      if (authName) {
-                                        userName = authName;
-                                        console.log(`Nome do usuário encontrado na autenticação: ${userName}`);
-                                      } else {
-                                        // Fallback: buscar da tabela profiles
-                                        console.log(`Buscando nome do usuário ${matricula.user_id} da tabela profiles`);
-                                        const { data: userData, error: userError } = await supabase
-                                          .from('profiles')
-                                          .select('name, email')
-                                          .eq('id', matricula.user_id)
-                                          .single();
-                                        
-                                        if (userError) {
-                                          console.error(`Erro ao buscar perfil do usuário:`, userError);
-                                        } else if (userData && userData.name) {
-                                          userName = userData.name;
-                                          console.log(`Nome do usuário encontrado: ${userName}`);
-                                        } else if (userData && userData.email && userName === 'Aluno não encontrado') {
-                                          userName = userData.email.split('@')[0];
-                                          console.log(`Usando email como fallback para nome: ${userName}`);
+                                        // Buscar dados do curso
+                                        const curso = cursos.find(c => c.id === matricula.course_id);
+                                        if (!curso) {
+                                          throw new Error('Curso não encontrado');
                                         }
-                                      }
-                                      
-                                      // Criar certificado diretamente
-                                      const now = new Date().toISOString();
-                                      console.log(`Criando certificado com nome: ${userName}`);
-                                      const { data: novoCertificado, error: certError } = await supabase
-                                        .from('certificates')
-                                        .insert({
-                                          user_id: matricula.user_id,
-                                          course_id: matricula.course_id,
-                                          user_name: userName,
-                                          course_name: matricula.courseTitle,
-                                          issue_date: now
-                                        })
-                                        .select('id')
-                                        .single();
-                                      
-                                      if (certError) {
-                                        console.error("Erro ao criar certificado:", certError);
-                                        toast.error(`Erro ao gerar certificado: ${certError.message}`);
-                                        setProcessando(false);
-                                        return;
-                                      }
-                                      
-                                      if (novoCertificado && novoCertificado.id) {
-                                        console.log(`Certificado gerado com sucesso: ${novoCertificado.id}`);
-                                        toast.success("Certificado gerado com sucesso!");
+                                        
+                                        // Criar certificado
+                                        const novoCertificado = await fetchWithAuth('/api/certificates', {
+                                          method: 'POST',
+                                          body: JSON.stringify({
+                                            user_id: matricula.user_id,
+                                            course_id: matricula.course_id,
+                                            course_name: curso.title
+                                          })
+                                        });
+                                        
+                                        if (!novoCertificado || !novoCertificado.id) {
+                                          throw new Error('Erro ao criar certificado');
+                                        }
                                         
                                         // Atualizar a matrícula na lista
                                         const matriculasAtualizadas = matriculas.map(m => {
@@ -884,12 +839,17 @@ export default function GerenciadorCertificados() {
                                         });
                                         
                                         setMatriculas(matriculasAtualizadas);
-                                        
-                                        // Recarregar certificados
                                         await carregarCertificados();
-                                      } else {
-                                        toast.error("Erro ao gerar certificado.");
+                                        toast.success('Certificado gerado com sucesso!');
+                                      } catch (error) {
+                                        console.error('Erro ao gerar certificado:', error);
+                                        toast.error('Erro ao gerar certificado. Tente novamente.');
+                                      } finally {
+                                        setProcessando(false);
                                       }
+                                      
+                                      // O certificado já foi criado na seção try acima, removemos a integração direta com Supabase
+                                      // Este trecho foi removido pois estava causando problemas
                                     } catch (error) {
                                       console.error("Erro ao gerar certificado:", error);
                                       toast.error("Erro ao gerar certificado.");

@@ -1,5 +1,5 @@
 import { Lesson } from '@/types';
-import { supabase } from '@/integrations/supabase/client';
+import { getLessonsByModuleId as apiGetLessonsByModuleId, createLesson as apiCreateLesson, updateLesson as apiUpdateLesson, deleteLesson as apiDeleteLesson } from '@/services/api/restClient';
 
 export const lessonService = {
   // Método auxiliar para mapear dados da aula do formato do banco para o formato da aplicação
@@ -43,24 +43,23 @@ export const lessonService = {
     if (!moduleId) throw new Error('ID do módulo é obrigatório');
 
     try {
-      const { data, error } = await supabase
-        .from('lessons')
-        .select('id, module_id, title, description, duration, video_url, content, order_number')
-        .eq('module_id', moduleId)
-        .order('order_number', { ascending: true });
+      // Usar o cliente REST para buscar as aulas do módulo
+      const lessonsData = await apiGetLessonsByModuleId(moduleId);
+      
+      if (!lessonsData || lessonsData.length === 0) {
+        console.log('Nenhuma aula encontrada para o módulo:', moduleId);
+        return []; // Retornar array vazio em vez de lançar erro
+      }
 
-      if (error) throw error;
-      if (!data) throw new Error('Nenhuma aula encontrada para este módulo');
-
-      return data.map(lesson => ({
+      return lessonsData.map(lesson => ({
         id: lesson.id,
-        moduleId: lesson.module_id,
+        moduleId: lesson.moduleId,
         title: lesson.title,
         description: lesson.description || '',
         duration: lesson.duration || '',
-        videoUrl: lesson.video_url || '',
+        videoUrl: lesson.videoUrl || '',
         content: lesson.content || '',
-        order: lesson.order_number,
+        order: lesson.order,
         isCompleted: false
       }));
     } catch (error) {
@@ -83,66 +82,42 @@ export const lessonService = {
     try {
       // Preparar os dados para inserção, garantindo valores padrão adequados
       const lessonToInsert = {
-        module_id: moduleId,
+        moduleId: moduleId,
         title: lessonData.title.trim(),
         description: lessonData.description?.trim() || '',
         duration: lessonData.duration?.trim() || '',
-        video_url: lessonData.videoUrl?.trim() || '',
+        videoUrl: lessonData.videoUrl?.trim() || '',
         content: lessonData.content?.trim() || '',
-        order_number: lessonData.order || 1
+        order: lessonData.order || 1,
+        isCompleted: false
       };
 
-      // Verificar se já existe uma aula com a mesma ordem no módulo
-      const { data: existingLessons, error: checkError } = await supabase
-        .from('lessons')
-        .select('id, title, order_number')
-        .eq('module_id', moduleId)
-        .eq('order_number', lessonToInsert.order_number);
-
-      if (checkError) {
-        console.error('Erro ao verificar aulas existentes:', checkError);
-        throw new Error('Falha ao verificar aulas existentes');
-      }
-
-      // Se já existe uma aula com a mesma ordem, alertar o usuário
-      if (existingLessons && existingLessons.length > 0) {
-        throw new Error(`Já existe uma aula com a ordem ${lessonToInsert.order_number} neste módulo: ${existingLessons[0].title}`);
-      }
-
-      // Inserir a nova aula
-      const { data, error } = await supabase
-        .from('lessons')
-        .insert(lessonToInsert)
-        .select('id, module_id, title, description, duration, video_url, content, order_number')
-        .single();
-
-      if (error) {
-        console.error('Erro ao inserir aula:', error);
-        throw error;
-      }
+      // Usar o cliente REST para criar a aula
+      // A validação de ordem duplicada será feita no servidor
+      const newLessonData = await apiCreateLesson(moduleId, lessonToInsert);
       
-      if (!data) {
+      if (!newLessonData) {
         throw new Error('Nenhum dado retornado após criar a aula');
       }
 
       // Criamos um objeto Lesson completo para retornar
       const newLesson: Lesson = {
-        id: data.id,
-        moduleId: data.module_id,
-        title: data.title,
-        description: data.description || '',
-        duration: data.duration || '',
-        videoUrl: data.video_url || '',
-        content: data.content || '',
-        order: data.order_number,
+        id: newLessonData.id,
+        moduleId: newLessonData.moduleId,
+        title: newLessonData.title,
+        description: newLessonData.description || '',
+        duration: newLessonData.duration || '',
+        videoUrl: newLessonData.videoUrl || '',
+        content: newLessonData.content || '',
+        order: newLessonData.order,
         isCompleted: false
       };
       
       // Adicionamos propriedades adicionais para compatibilidade com a interface do AdminLessons
       // Essas propriedades não fazem parte do tipo Lesson, mas são usadas na interface
-      (newLesson as any).order_number = data.order_number;
-      (newLesson as any).video_url = data.video_url || '';
-      (newLesson as any).module_id = data.module_id;
+      (newLesson as any).order_number = newLessonData.order;
+      (newLesson as any).video_url = newLessonData.videoUrl || '';
+      (newLesson as any).module_id = newLessonData.moduleId;
 
       return newLesson;
     } catch (error) {
@@ -163,99 +138,58 @@ export const lessonService = {
     if (!lessonId) throw new Error('ID da aula é obrigatório');
 
     try {
-      // Primeiro, buscar a aula atual para garantir que temos todos os dados necessários
-      const { data: currentLesson, error: fetchError } = await supabase
-        .from('lessons')
-        .select('*')
-        .eq('id', lessonId)
-        .single();
-      
-      if (fetchError) {
-        console.error('Erro ao buscar aula atual:', fetchError);
-        throw new Error('Falha ao buscar dados da aula para atualização');
-      }
-      
-      if (!currentLesson) {
-        throw new Error('Aula não encontrada');
-      }
-
-      // Preparar os dados para atualização, usando valores atuais como fallback
+      // Preparar os dados para atualização
+      // Converter os nomes de propriedades para o formato esperado pela API REST
       const updates = {
-        title: lessonData.title?.trim() ?? currentLesson.title,
-        description: lessonData.description?.trim() ?? currentLesson.description ?? '',
-        duration: lessonData.duration?.trim() ?? currentLesson.duration ?? '',
-        video_url: lessonData.videoUrl?.trim() ?? currentLesson.video_url ?? '',
-        content: lessonData.content?.trim() ?? currentLesson.content ?? '',
-        order_number: lessonData.order ?? currentLesson.order_number,
-        module_id: lessonData.moduleId ?? currentLesson.module_id
+        title: lessonData.title?.trim(),
+        description: lessonData.description?.trim(),
+        duration: lessonData.duration?.trim(),
+        videoUrl: lessonData.videoUrl?.trim(),
+        content: lessonData.content?.trim(),
+        order: lessonData.order,
+        moduleId: lessonData.moduleId
       };
       
-      // Validar título
-      if (!updates.title) {
+      // Remover propriedades undefined
+      Object.keys(updates).forEach(key => {
+        if (updates[key] === undefined) {
+          delete updates[key];
+        }
+      });
+      
+      // Validar título se estiver sendo atualizado
+      if (updates.title !== undefined && !updates.title) {
         throw new Error('Título da aula não pode ficar vazio');
       }
 
-      console.log('Tentando atualizar aula usando RPC primeiro (mais confiável)...');
+      console.log('Atualizando aula usando o cliente REST...');
       
-      // Usar a função RPC como primeira opção para evitar o erro 406
-      const { data: rpcData, error: rpcError } = await supabase.rpc('update_lesson', {
-        p_lesson_id: lessonId,
-        p_title: updates.title,
-        p_description: updates.description || '',
-        p_duration: updates.duration || '',
-        p_video_url: updates.video_url || '',
-        p_content: updates.content || '',
-        p_order_number: updates.order_number || 1,
-        p_module_id: updates.module_id
-      });
+      // Usar o cliente REST para atualizar a aula
+      const updatedLessonData = await apiUpdateLesson(lessonId, updates);
       
-      // Se a RPC funcionou, buscar os dados atualizados
-      if (!rpcError && rpcData) {
-        console.log('Atualização via RPC bem-sucedida, buscando dados atualizados');
-        
-        // Buscar os dados atualizados
-        const { data, error } = await supabase
-          .from('lessons')
-          .select('id, module_id, title, description, duration, video_url, content, order_number')
-          .eq('id', lessonId)
-          .single();
-        
-        if (!error && data) {
-          return this.mapLessonData(data);
-        }
-        
-        // Se não conseguir buscar, retornar dados simulados baseados na atualização
-        return this.createSimulatedLesson(lessonId, updates);
+      if (!updatedLessonData) {
+        throw new Error('Nenhum dado retornado após atualizar a aula');
       }
       
-      console.log('RPC falhou ou não disponível, tentando método upsert...');
-      
-      // Se a RPC falhou, tentar com upsert como fallback
-      const { data, error } = await supabase
-        .from('lessons')
-        .upsert({
-          id: lessonId,  // Incluir o ID para garantir que estamos atualizando o registro correto
-          ...updates     // Espalhar todos os campos atualizados
-        })
-        .select('id, module_id, title, description, duration, video_url, content, order_number')
-        .single();
-
-      if (error) {
-        console.error('Erro na operação de atualização via upsert:', error);
-        console.log('Ambas as abordagens (RPC e upsert) falharam, retornando dados simulados');
-        
-        // Se ambas as abordagens falharem, retornar os dados que tentamos atualizar
-        // para que a interface do usuário não quebre
-        return this.createSimulatedLesson(lessonId, updates);
-      }
-      
-      if (!data) {
-        console.warn('Nenhum dado retornado após atualizar a aula, usando dados de entrada');
-        return this.createSimulatedLesson(lessonId, updates);
-      }
-
       // Mapear os dados retornados para o formato da aplicação
-      return this.mapLessonData(data);
+      const updatedLesson: Lesson = {
+        id: updatedLessonData.id,
+        moduleId: updatedLessonData.moduleId,
+        title: updatedLessonData.title,
+        description: updatedLessonData.description || '',
+        duration: updatedLessonData.duration || '',
+        videoUrl: updatedLessonData.videoUrl || '',
+        content: updatedLessonData.content || '',
+        order: updatedLessonData.order,
+        isCompleted: updatedLessonData.isCompleted || false
+      };
+      
+      // Adicionar propriedades para compatibilidade com a interface do AdminLessons
+      (updatedLesson as any).order_number = updatedLessonData.order;
+      (updatedLesson as any).video_url = updatedLessonData.videoUrl || '';
+      (updatedLesson as any).module_id = updatedLessonData.moduleId;
+      
+      return updatedLesson;
     } catch (error) {
       console.error('Erro ao atualizar aula:', error);
       
@@ -304,51 +238,16 @@ export const lessonService = {
     if (!lessonId) throw new Error('ID da aula é obrigatório');
 
     try {
-      // Primeiro verificar se a aula existe
-      const { data: lesson, error: fetchError } = await supabase
-        .from('lessons')
-        .select('id, module_id, order_number')
-        .eq('id', lessonId)
-        .single();
+      console.log('Excluindo aula usando o cliente REST...');
       
-      if (fetchError) {
-        console.error('Erro ao verificar aula para exclusão:', fetchError);
-        throw new Error('Falha ao verificar aula para exclusão');
-      }
+      // Usar o cliente REST para excluir a aula
+      // A reordenação das aulas restantes será feita no servidor
+      await apiDeleteLesson(lessonId);
       
-      if (!lesson) {
-        throw new Error('Aula não encontrada para exclusão');
-      }
-
-      // Excluir a aula
-      const { error } = await supabase
-        .from('lessons')
-        .delete()
-        .eq('id', lessonId);
-
-      if (error) {
-        console.error('Erro na operação de exclusão:', error);
-        throw error;
-      }
+      console.log('Aula excluída com sucesso');
       
-      // Reordenar as aulas restantes (opcional)
-      // Buscar todas as aulas do módulo com ordem maior que a aula excluída
-      const { data: lessonsToReorder, error: reorderFetchError } = await supabase
-        .from('lessons')
-        .select('id, order_number')
-        .eq('module_id', lesson.module_id)
-        .gt('order_number', lesson.order_number)
-        .order('order_number');
-      
-      if (!reorderFetchError && lessonsToReorder && lessonsToReorder.length > 0) {
-        // Atualizar a ordem de cada aula (decrementar em 1)
-        for (const lessonToReorder of lessonsToReorder) {
-          await supabase
-            .from('lessons')
-            .update({ order_number: lessonToReorder.order_number - 1 })
-            .eq('id', lessonToReorder.id);
-        }
-      }
+      // Não precisamos fazer nada mais, pois o servidor REST já cuida da reordenação
+      // das aulas restantes, se necessário
     } catch (error) {
       console.error('Erro ao excluir aula:', error);
       throw error; // Propagar o erro original para melhor diagnóstico

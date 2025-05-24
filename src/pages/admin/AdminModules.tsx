@@ -42,7 +42,7 @@ import { Course, Module } from "@/types";
 import { courseService } from "@/services/api";
 import { useModuleManagement } from "@/hooks/useModuleManagement";
 import { useAppData } from "@/contexts/AppDataContext";
-import { supabase } from "@/integrations/supabase/client";
+import { getCourses } from "@/services/api/restClient";
 
 const AdminModules = () => {
   const location = useLocation();
@@ -75,29 +75,15 @@ const AdminModules = () => {
 
   const fetchCourses = async () => {
     try {
-      // Obter cursos
-      const coursesData = await courseService.getCourses();
+      // Obter cursos usando o cliente REST
+      const coursesData = await getCourses();
       
-      // Obter contagem de matrículas para cada curso
-      const coursesWithEnrollmentCount = await Promise.all(coursesData.map(async (course) => {
-        try {
-          // Buscar matrículas para este curso
-          const { data: enrollments, error } = await supabase
-            .from('enrollments')
-            .select('id')
-            .eq('course_id', course.id);
-          
-          if (error) throw error;
-          
-          // Atualizar a contagem de alunos matriculados
-          return {
-            ...course,
-            enrolledCount: enrollments?.length || 0
-          };
-        } catch (err) {
-          console.error(`Erro ao buscar matrículas para o curso ${course.id}:`, err);
-          return course;
-        }
+      // Por enquanto, vamos usar a contagem de matrículas que vem diretamente da API
+      // No futuro, podemos implementar um endpoint específico para obter a contagem de matrículas
+      const coursesWithEnrollmentCount = coursesData.map(course => ({
+        ...course,
+        // Usar o valor existente ou definir como 0
+        enrolledCount: course.enrolledCount || 0
       }));
       
       setCourses(coursesWithEnrollmentCount);

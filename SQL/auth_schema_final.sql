@@ -1,0 +1,298 @@
+-- Script para criar o esquema de autenticau00e7u00e3o no MySQL da Azure
+
+-- Criar schema de autenticau00e7u00e3o
+CREATE DATABASE IF NOT EXISTS learning_platform;
+USE learning_platform;
+
+-- Criar schema de autenticau00e7u00e3o
+CREATE SCHEMA IF NOT EXISTS auth;
+
+-- Tabela de usuu00e1rios
+CREATE TABLE IF NOT EXISTS auth.users (
+  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  email VARCHAR(255) UNIQUE NOT NULL,
+  encrypted_password VARCHAR(255) NOT NULL,
+  role VARCHAR(50) DEFAULT 'student',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL,
+  last_sign_in_at TIMESTAMP NULL,
+  confirmed_at TIMESTAMP NULL,
+  user_metadata JSON DEFAULT (JSON_OBJECT()),
+  username VARCHAR(255) NULL
+);
+
+-- Tabela de sessu00f5es
+CREATE TABLE IF NOT EXISTS auth.sessions (
+  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  user_id CHAR(36) NOT NULL,
+  token VARCHAR(255) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+  expires_at TIMESTAMP NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE
+);
+
+-- Tabela de perfis (no schema auth)
+CREATE TABLE IF NOT EXISTS auth.profiles (
+  id CHAR(36) PRIMARY KEY,
+  name VARCHAR(255) NULL,
+  avatar_url VARCHAR(255) NULL,
+  bio TEXT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL,
+  FOREIGN KEY (id) REFERENCES auth.users(id) ON DELETE CASCADE
+);
+
+-- Funu00e7u00e3o para gerar UUID v4
+DELIMITER //
+CREATE FUNCTION IF NOT EXISTS uuid_v4() 
+RETURNS CHAR(36)
+DETERMINISTIC
+BEGIN
+    RETURN UUID();
+END //
+DELIMITER ;
+
+-- Trigger para criar perfil automaticamente quando um usuu00e1rio u00e9 criado
+DELIMITER //
+CREATE TRIGGER IF NOT EXISTS auth.on_auth_user_created
+AFTER INSERT ON auth.users
+FOR EACH ROW
+BEGIN
+  INSERT INTO auth.profiles (id, name, avatar_url)
+  VALUES (
+    NEW.id, 
+    COALESCE(NEW.username, JSON_UNQUOTE(JSON_EXTRACT(NEW.user_metadata, '$.name')), NEW.email), 
+    JSON_UNQUOTE(JSON_EXTRACT(NEW.user_metadata, '$.avatar'))
+  );
+END //
+DELIMITER ;
+
+-- Funu00e7u00e3o para verificar senha (usando MySQL PASSWORD para simplificar)
+DELIMITER //
+CREATE FUNCTION IF NOT EXISTS auth.hash_password(password VARCHAR(255))
+RETURNS VARCHAR(255)
+DETERMINISTIC
+BEGIN
+  RETURN PASSWORD(CONCAT('lms_salt_', password));
+END //
+DELIMITER ;
+
+-- Funu00e7u00e3o para verificar senha
+DELIMITER //
+CREATE FUNCTION IF NOT EXISTS auth.verify_password(password VARCHAR(255), hashed_password VARCHAR(255))
+RETURNS BOOLEAN
+DETERMINISTIC
+BEGIN
+  RETURN auth.hash_password(password) = hashed_password;
+END //
+DELIMITER ;
+
+-- Procedimento para autenticar usuu00e1rio
+DELIMITER //
+CREATE PROCEDURE IF NOT EXISTS auth.authenticate(IN p_email VARCHAR(255), IN p_password VARCHAR(255))
+BEGIN
+  DECLARE user_id CHAR(36);
+  DECLARE user_email VARCHAR(255);
+  DECLARE user_role VARCHAR(50);
+  DECLARE user_created_at TIMESTAMP;
+  DECLARE user_password VARCHAR(255);
+  
+  -- Buscar usuu00e1rio pelo email
+  SELECT id, email, role, created_at, encrypted_password 
+  INTO user_id, user_email, user_role, user_created_at, user_password
+  FROM auth.users 
+  WHERE email = p_email LIMIT 1;
+  
+  -- Verificar se o usuu00e1rio existe
+  IF user_id IS NULL THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Usuu00e1rio nu00e3o encontrado';
+  END IF;
+  
+  -- Verificar senha
+  IF NOT auth.verify_password(p_password, user_password) THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Senha incorreta';
+  END IF;
+  
+  -- Atualizar u00faltimo login
+  UPDATE auth.users SET 
+    last_sign_in_at = CURRENT_TIMESTAMP
+  WHERE id = user_id;
+  
+  -- Retornar dados do usuu00e1rio
+  SELECT * FROM auth.users WHERE id = user_id;
+  
+END //
+DELIMITER ;
+
+-- Procedimento para criar usuu00e1rio
+DELIMITER //
+CREATE PROCEDURE IF NOT EXISTS auth.create_user(
+  IN p_email VARCHAR(255),
+  IN p_password VARCHAR(255),
+  IN p_role VARCHAR(50),
+  IN p_metadata JSON,
+  IN p_username VARCHAR(255)
+)
+BEGIN
+  DECLARE new_user_id CHAR(36);
+  
+  -- Gerar UUID para o novo usuu00e1rio
+  SET new_user_id = UUID();
+  
+  -- Inserir novo usuu00e1rio
+  INSERT INTO auth.users (
+    id,
+    email,
+    encrypted_password,
+    role,
+    user_metadata,
+    username,
+    created_at,
+    updated_at
+  ) VALUES (
+    new_user_id,
+    p_email,
+    auth.hash_password(p_password),
+    COALESCE(p_role, 'student'),
+    COALESCE(p_metadata, JSON_OBJECT()),
+    p_username,
+    CURRENT_TIMESTAMP,
+    CURRENT_TIMESTAMP
+  );
+  
+  -- Retornar dados do usuu00e1rio criado
+  SELECT * FROM auth.users WHERE id = new_user_id;
+  
+END //
+DELIMITER ;
+
+-- Procedimento para criar sessu00e3o
+DELIMITER //
+CREATE PROCEDURE IF NOT EXISTS auth.create_session(IN p_user_id CHAR(36), IN p_expires_in_seconds INT)
+BEGIN
+  DECLARE new_session_id CHAR(36);
+  DECLARE token_value VARCHAR(255);
+  DECLARE expiry_time TIMESTAMP;
+  
+  -- Gerar UUID para a nova sessu00e3o
+  SET new_session_id = UUID();
+  
+  -- Gerar token aleatu00f3rio
+  SET token_value = SHA2(CONCAT(new_session_id, RAND(), CURRENT_TIMESTAMP), 256);
+  
+  -- Calcular data de expirau00e7u00e3o
+  SET expiry_time = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL p_expires_in_seconds SECOND);
+  
+  -- Inserir nova sessu00e3o
+  INSERT INTO auth.sessions (
+    id,
+    user_id,
+    token,
+    created_at,
+    expires_at
+  ) VALUES (
+    new_session_id,
+    p_user_id,
+    token_value,
+    CURRENT_TIMESTAMP,
+    expiry_time
+  );
+  
+  -- Retornar dados da sessu00e3o criada
+  SELECT * FROM auth.sessions WHERE id = new_session_id;
+  
+END //
+DELIMITER ;
+
+-- Procedimento para validar sessu00e3o
+DELIMITER //
+CREATE PROCEDURE IF NOT EXISTS auth.validate_session(IN p_token VARCHAR(255))
+BEGIN
+  DECLARE session_user_id CHAR(36);
+  DECLARE session_expires_at TIMESTAMP;
+  
+  -- Buscar sessu00e3o pelo token
+  SELECT user_id, expires_at 
+  INTO session_user_id, session_expires_at
+  FROM auth.sessions 
+  WHERE token = p_token LIMIT 1;
+  
+  -- Verificar se a sessu00e3o existe
+  IF session_user_id IS NULL THEN
+    SELECT NULL as user_id, FALSE as valid, TRUE as expired;
+  ELSE
+    -- Verificar se a sessu00e3o expirou
+    IF session_expires_at < CURRENT_TIMESTAMP THEN
+      SELECT session_user_id as user_id, TRUE as valid, TRUE as expired;
+    ELSE
+      SELECT session_user_id as user_id, TRUE as valid, FALSE as expired;
+    END IF;
+  END IF;
+  
+END //
+DELIMITER ;
+
+-- Procedimento para obter usuu00e1rio por ID
+DELIMITER //
+CREATE PROCEDURE IF NOT EXISTS auth.get_user_by_id(IN p_user_id CHAR(36))
+BEGIN
+  SELECT * FROM auth.users WHERE id = p_user_id;
+END //
+DELIMITER ;
+
+-- Procedimento para atualizar metadados do usuu00e1rio
+DELIMITER //
+CREATE PROCEDURE IF NOT EXISTS auth.update_user_metadata(IN p_user_id CHAR(36), IN p_metadata JSON)
+BEGIN
+  UPDATE auth.users SET 
+    user_metadata = p_metadata,
+    updated_at = CURRENT_TIMESTAMP
+  WHERE id = p_user_id;
+  
+  SELECT * FROM auth.users WHERE id = p_user_id;
+END //
+DELIMITER ;
+
+-- Procedimento para listar todos os usuu00e1rios (apenas para administradores)
+DELIMITER //
+CREATE PROCEDURE IF NOT EXISTS auth.list_users()
+BEGIN
+  SELECT * FROM auth.users ORDER BY created_at DESC;
+END //
+DELIMITER ;
+
+-- Inserir um usuu00e1rio administrador para teste
+CALL auth.create_user('admin@example.com', 'admin123', 'admin', JSON_OBJECT('name', 'Administrador'), 'Administrador');
+
+-- Inserir um usuu00e1rio estudante para teste
+CALL auth.create_user('student@example.com', 'student123', 'student', JSON_OBJECT('name', 'Estudante'), 'Estudante');
+
+-- Trigger para integrar com learning_platform
+DELIMITER //
+CREATE TRIGGER IF NOT EXISTS auth.tr_create_learning_profile
+AFTER INSERT ON auth.users
+FOR EACH ROW
+BEGIN
+    -- Verifica se o banco de dados learning_platform existe
+    IF EXISTS (SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = 'learning_platform') THEN
+        -- Verifica se a tabela profiles existe no banco learning_platform
+        IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'learning_platform' AND TABLE_NAME = 'profiles') THEN
+            -- Verifica se ju00e1 existe um perfil para este usuu00e1rio
+            IF NOT EXISTS (SELECT 1 FROM learning_platform.profiles WHERE id = NEW.id) THEN
+                -- Cria um novo perfil
+                INSERT INTO learning_platform.profiles (
+                    id, 
+                    name, 
+                    email, 
+                    role
+                ) VALUES (
+                    NEW.id, 
+                    COALESCE(NEW.username, 'Usuu00e1rio'), 
+                    NEW.email, 
+                    CASE WHEN NEW.role = 'admin' THEN 'admin' ELSE 'student' END
+                );
+            END IF;
+        END IF;
+    END IF;
+END //
+DELIMITER ;

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { fetchWithAuth } from '@/services/api/restClient';
 
 export default function DashboardStats() {
   const [stats, setStats] = useState({
@@ -16,11 +17,12 @@ export default function DashboardStats() {
 
   const fetchStats = async () => {
     try {
-      const coursesRes = await supabase.from('courses').select('id', { count: 'exact', head: true });
-      const modulesRes = await supabase.from('modules').select('id', { count: 'exact', head: true });
-      const lessonsRes = await supabase.from('lessons').select('id', { count: 'exact', head: true });
-      const usersRes = await supabase.from('profiles').select('id', { count: 'exact', head: true });
-      const certificatesRes = await supabase.from('certificates').select('id', { count: 'exact', head: true });
+      // Replace Supabase stats fetch with REST API calls
+      const coursesRes = await fetchWithAuth('/api/courses?count=true');
+      const modulesRes = await fetchWithAuth('/api/modules?count=true');
+      const lessonsRes = await fetchWithAuth('/api/lessons?count=true');
+      const usersRes = await fetchWithAuth('/api/users?count=true');
+      const certificatesRes = await fetchWithAuth('/api/certificates?count=true');
 
       setStats({
         totalCourses: coursesRes.count || 0,
